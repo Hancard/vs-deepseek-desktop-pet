@@ -1,5 +1,26 @@
 # Change Log
 
+## [0.3.11] — 2026-10-02
+
+> 用户请求：继续检查 bug 并修复 push（例行审计轮）。审计覆盖 SSE 事件流、
+> 打字机并发、拖拽/点击判别与桥 API 面完整性。
+
+### Fixed
+- **SSE 断线重连不再整批重播旧消息**（standalone.py）：此前每条事件不带
+  `id:` 字段，EventSource 一次自动重连就会把最近 20 条（SSE_REPLAY_COUNT）
+  旧消息当新气泡全弹一遍。现在每条事件带 `id: <seq>`，重连时按
+  `Last-Event-ID` 头只补发缺口；全新连接维持原重播行为。续传基线从
+  after_seq 起步——replay 为空时若停在 0，轮询循环会把整个队列再发一遍
+  （真 socket 测试实测抓到）。
+- **空文案不再创建空气泡**（ui.html）：后端返回空 text 时，`showBubble`
+  此前仍会建一个不可见的空气泡，留一块空 region 挂 8 秒。
+
+### Verified
+- 新增真 socket 端到端测试 `live2d_probe/test_sse_resume.py`：全新连接重播、
+  从中间续传、从最新续传（零补发）、畸形 Last-Event-ID 安全降级，四场景全过。
+- 归档 e2e 推送测试（test_push_e2e.py）复跑 PASS；ui.html 三个 script 块
+  node --check 全过。
+
 ## [0.3.10] — 2026-09-26
 
 > 用户请求：继续检查 bug 并修复 push（例行审计轮）。桌宠自 9-23 起未重启、
