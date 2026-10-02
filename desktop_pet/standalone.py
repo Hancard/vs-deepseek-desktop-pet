@@ -216,15 +216,29 @@ class AiriHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(b':ok\n\n')
-            last_seq = 0
+            # 断线续传：EventSource 自动重连时会带上最后收到的 id（Last-Event-ID 头）。
+            # 此前每条事件不带 id，重连后整批重播最近 SSE_REPLAY_COUNT(20) 条 ——
+            # 一次网络抖动，桌宠就把旧对话当新气泡全弹一遍（复读机）。
+            # 现在每条事件带 id: <seq>，重连只补发缺口；全新连接（无该头）维持原重播行为。
             try:
-                # 新连接先重播最近几条（让刚打开的窗口能看到问候语）
+                after_seq = int(self.headers.get('Last-Event-ID') or 0)
+            except (TypeError, ValueError):
+                after_seq = 0
+            last_seq = after_seq   # 轮询基线从续传点起步：replay 为空时若停在 0，
+                                   # 下面的轮询循环会把整个队列再发一遍（实测踩过）
+            try:
+                # 新连接先重播最近几条（让刚打开的窗口能看到问候语）；
+                # 带 Last-Event-ID 的重连只重播 seq 大于它的部分
                 with queue_lock:
-                    replay = sse_queue[-SSE_REPLAY_COUNT:]
+                    if after_seq > 0:
+                        replay = [(s, d) for (s, d) in sse_queue if s > after_seq]
+                        replay = replay[-SSE_REPLAY_COUNT:]
+                    else:
+                        replay = sse_queue[-SSE_REPLAY_COUNT:]
                     if replay:
                         last_seq = replay[-1][0]
                 for _seq_no, d in replay:
-                    self.wfile.write(f'data: {d}\n\n'.encode('utf-8'))
+                    self.wfile.write(f'id: {_seq_no}\ndata: {d}\n\n'.encode('utf-8'))
                 self.wfile.flush()
                 while True:
                     time.sleep(0.3)
@@ -234,7 +248,7 @@ class AiriHandler(BaseHTTPRequestHandler):
                             last_seq = new_msgs[-1][0]
                     for _seq_no, d in new_msgs:
                         try:
-                            self.wfile.write(f'data: {d}\n\n'.encode('utf-8'))
+                            self.wfile.write(f'id: {_seq_no}\ndata: {d}\n\n'.encode('utf-8'))
                             self.wfile.flush()
                         except Exception:
                             return
