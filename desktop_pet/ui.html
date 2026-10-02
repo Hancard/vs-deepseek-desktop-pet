@@ -1010,6 +1010,8 @@
     }
 
     function showBubble(text, isError) {
+      // 空文案不建气泡：只会留一块看不见的空 region 挂 8 秒（后端返回空 text 时）
+      if (!text) return;
       pruneBubbles();
       var el = document.createElement('div');
       el.className = isError ? 'bubble error' : 'bubble';
