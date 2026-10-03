@@ -278,15 +278,29 @@ class AiriHandler(BaseHTTPRequestHandler):
             if 'payload' in msg and 'text' in msg.get('payload', {}):
                 t = msg.get('type', 'chatMessage')
                 tx = msg['payload']['text']
+                # 外部 POST 的内容不可信：text 传数字/对象时，前端 typeText 的
+                # charAt 会直接抛 TypeError（气泡空白 + jsError 黑匣子报警）。
+                # 非字符串一律序列化成可读文本，绝不让畸形 payload 炸穿链路。
+                if not isinstance(tx, str):
+                    tx = json.dumps(tx, ensure_ascii=False) if (
+                        isinstance(tx, (dict, list))) else str(tx)
                 em = msg['payload'].get('emotion', 'idle')
                 push_message(t, tx, em)
             elif msg.get('type') == 'diagnostics' and 'payload' in msg:
                 p = msg['payload']
+                # items 传 null 会在这里炸出 None[:5] TypeError → 500 断连；
+                # count 传字符串会让 _builtin_reply 的 > 0 比较抛 TypeError。
+                # 诊断来源不止自家扩展一个，字段类型必须兜底。
+                try:
+                    error_count = int(p.get('count', 0) or 0)
+                except (TypeError, ValueError):
+                    error_count = 0
+                items = p.get('items')
                 ctx = {
                     'trigger': p.get('trigger', 'diagnostics'),
-                    'error_count': p.get('count', 0),
+                    'error_count': error_count,
                     'language': p.get('language', 'unknown'),
-                    'sample_errors': p.get('items', [])[:5],
+                    'sample_errors': items[:5] if isinstance(items, list) else [],
                 }
                 if _backend_available:
                     r = generate_response(ctx)
@@ -300,7 +314,11 @@ class AiriHandler(BaseHTTPRequestHandler):
                     if r:
                         push_message(r.get('type'), r.get('payload', {}).get('text', ''), r.get('payload', {}).get('emotion', 'idle'))
                 else:
-                    _builtin_reply(msg.get('error_count', 0))
+                    try:
+                        _ec = int(msg.get('error_count', 0) or 0)
+                    except (TypeError, ValueError):
+                        _ec = 0
+                    _builtin_reply(_ec)
             else:
                 push_message('chatMessage', msg.get('message', body), 'idle')
             self._json_response({'status': 'pushed'})
