@@ -1561,6 +1561,11 @@
       contextMenu.style.top = my + 'px';
       // 菜单弹出后立刻重推窗口形状：否则菜单在 region 之外，被裁成"看不见的菜单"
       if (typeof pushSilhouette === 'function') pushSilhouette(true);
+      // 过渡动画（180ms scale+translate）结束后再确认一次：上面的立即推送
+      // 量到的是 scale(0.92) translateY(-4px) 的中途盒子，比最终位置小一圈，
+      // 菜单边缘会被 region 短暂裁掉 —— 和气泡 popUp 是同一类问题（第十一轮）。
+      // 周期轮询最迟 500ms 会纠正，但与其靠运气不如显式确认。
+      if (typeof pushSilhouette === 'function') setTimeout(function() { pushSilhouette(true); }, 230);
     });
     document.addEventListener('click', function() {
       if (!contextMenu.classList.contains('show')) return;
