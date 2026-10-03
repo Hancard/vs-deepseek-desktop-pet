@@ -1,5 +1,33 @@
 # Change Log
 
+## [0.3.12] — 2026-10-03
+
+> 用户请求：继续检查 bug 并修复 push（例行审计轮）。审计覆盖 ui.html 全部
+> 前端逻辑、standalone.py /push 分发链、common.py 窗口/region 层、
+> live2d_assets.py 素材链与 extension.ts 诊断转发。
+
+### Fixed
+- **右键菜单弹出瞬间不再被 region 短暂裁边**（ui.html）：菜单有 180ms 的
+  scale(0.92)+translateY(-4px) 过渡动画，此前的立即推送量到的是动画中途的
+  小一圈盒子，菜单边缘会被 region 裁掉几百毫秒才被周期轮询纠正——与气泡
+  popUp 是同一类问题，气泡那边有 540ms 确认推送，菜单这边漏了。现在弹出
+  230ms 后再确认推一次。
+- **/push 对畸形 payload 不再炸链路**（standalone.py）：
+  * `items: null` → 此前 `None[:5]` 抛 TypeError → 500 断连；
+  * `count`/`error_count` 传字符串/null → 此前 `_builtin_reply` 的 `> 0`
+    比较抛 TypeError（all_clear 与 diagnostics 两分支都修）；
+  * `text` 传数字/对象 → 此前原样进队列，前端 `typeText` 的 `charAt` 直接
+    崩（jsError 黑匣子报警、气泡空白）。非字符串一律安全序列化。
+- **package.json repository.url 指向改名后仓库**（Hancard/vs-deepseek-desktop-pet），
+  此前还写着旧用户名旧仓库名，全靠 GitHub 重定向兜底。
+
+### Verified
+- 新增 `live2d_probe/test_push_hardening.py`：真 HTTP 端到端，9 个畸形用例
+  （items-null / count-str / count-null / text-number / text-dict / text-null /
+  all_clear×2 / items-str）全部 200 且队列内容合法，正常 diagnostics 与
+  chatMessage 路径回归通过。
+- ui.html 三个 script 块 node --check 全过；standalone.py py_compile 通过。
+
 ## [0.3.11] — 2026-10-02
 
 > 用户请求：继续检查 bug 并修复 push（例行审计轮）。审计覆盖 SSE 事件流、
