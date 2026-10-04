@@ -1,5 +1,31 @@
 # Change Log
 
+## [0.3.13] — 2026-10-04
+
+> 用户请求：继续检查 bug 并修复 push（例行审计轮）。审计覆盖此前未读过的
+> watcher.py / main.py / 全部启动批处理 / requirements.txt / .gitignore /
+> package.json，以及 ui.html 的首次**全量**通读（此前几轮只覆盖被改动区域）。
+
+### Fixed
+- **启动批处理纯 ASCII 化**（desktop_pet/launch_full.bat、start.bat）：两个
+  文件的 echo 里有 UTF-8 中文（"完整启动"/"Airi 桌宠 - 一键启动"），而 cmd
+  用 OEM 码页（简体中文 Windows = GBK）解码批处理——UTF-8 中文会被拆开并
+  吃掉后续换行，cmd 把中文碎片当命令执行，**整个脚本解析崩掉、后面一行
+  都不跑**。文件开头 `chcp 65001` 救不了（2026-09-22 已在本机实测实锤）。
+  字节级复查：两文件原各含 12/18 个高位字节、且不是合法 GBK；改英文后
+  三个 bat 全部 0 高位字节。
+- **补提交 .vscodeignore**：`live2d_probe/**` 排除出 VSIX 打包——探针/校验
+  工具是本机排查用的，不该跟着扩展发布（此改动躺在工作区漏了提交）。
+
+### Audited（无问题）
+- watcher.py：限流（每轮最多 20 个检查）、签名去重（含错误总数）、
+  删除文件缓存清理、all_clear 触发条件均正确。
+- main.py：旧入口保持最小改动，region/底色处理与 standalone 一致。
+- ui.html 全量：历史修复（region 动画守卫、打字机锁高、SSE 续传、
+  拖拽/点击判别、右键菜单收敛+确认推送）全部在位；剩余仅为无害死代码
+  （backendExit 无发送方、errorAlert 的 `|| 'angry'` 恒不触发）。
+- .gitignore 覆盖 .airi-pet.log 与 Cubism Core；requirements.txt 正常。
+
 ## [0.3.12] — 2026-10-03
 
 > 用户请求：继续检查 bug 并修复 push（例行审计轮）。审计覆盖 ui.html 全部
