@@ -11,3 +11,4 @@ vsc-extension-quickstart.md
 **/.vscode-test.*
 **/__pycache__/**
 **/*.pyc
+live2d_probe/**
