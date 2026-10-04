@@ -6,7 +6,7 @@ if "%PYTHON%"=="" set PYTHON=C:\Users\Mr.hancard\AppData\Local\Programs\Python\P
 if not exist "%PYTHON%" set PYTHON=python
 
 echo ============================================
-echo   Airi 桌宠 - 一键启动
+echo   Airi Desktop Pet - one-click launch
 echo ============================================
 echo.
 echo   Airi will watch your project for errors

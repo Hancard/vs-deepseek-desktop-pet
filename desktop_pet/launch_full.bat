@@ -5,7 +5,7 @@ if "%PYTHON%"=="" set PYTHON=python
 
 cd /d "%~dp0."
 echo ============================================
-echo   Airi Desktop Pet - 完整启动
+echo   Airi Desktop Pet - full launch (pet + watcher)
 echo ============================================
 echo.
 
