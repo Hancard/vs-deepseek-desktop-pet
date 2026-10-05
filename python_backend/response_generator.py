@@ -170,9 +170,20 @@ def generate_response(context: dict) -> dict:
     }
     """
     trigger = context.get("trigger", "diagnostics")
-    error_count = context.get("error_count", 0)
+    # 外部输入不可信：error_count 传 "3"/None 等会让后面的 >= 比较抛 TypeError
+    try:
+        error_count = int(context.get("error_count", 0) or 0)
+    except (TypeError, ValueError):
+        error_count = 0
     language = context.get("language", "python")
-    errors = context.get("sample_errors", [])
+    # sample_errors 元素不一定是 dict（外部 /push 可传字符串数组），
+    # 统一归一化成 dict，categorize_errors / try_deepseek_api 都按 dict 消费
+    errors = [
+        e if isinstance(e, dict) else {"message": str(e)}
+        for e in (context.get("sample_errors") or [])
+        if isinstance(e, (dict, str, int, float, bool))
+    ]
+    context["sample_errors"] = errors
 
     # 确定消息类型
     if trigger == "diagnostics" and error_count > 0:
