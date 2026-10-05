@@ -16,7 +16,7 @@ HTTP 服务器），接收消息并显示为可拖动的透明无边框桌面窗
 import sys
 import argparse
 
-from common import (get_screen_size, WindowAPI, load_html, start_asset_server,
+from common import (get_screen_size, get_dpi_scale, WindowAPI, load_html, start_asset_server,
                     disable_window_backdrop, fix_window_background, win_bg_mode)
 import live2d_assets
 
@@ -55,8 +55,10 @@ def main():
     screen_w, screen_h = get_screen_size()
 
     win_w, win_h = 300, 450
-    x = screen_w - win_w - 40
-    y = screen_h - win_h - 120
+    # 物理像素 -> 逻辑像素换算（窗口物理尺寸是 win_w*scale，详见 standalone.py）
+    _scale = get_dpi_scale()
+    x = int((screen_w - win_w * _scale - 40) / _scale)
+    y = int((screen_h - win_h * _scale - 120) / _scale)
 
     api = WindowAPI()
     # 点击互动只在 standalone.py（当前入口）接线；这里是旧入口，保持最小改动

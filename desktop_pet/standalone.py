@@ -17,7 +17,7 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
-from common import (get_screen_size, WindowAPI, find_character_image,
+from common import (get_screen_size, get_dpi_scale, WindowAPI, find_character_image,
                     load_html, start_asset_server, disable_window_backdrop,
                     fix_window_background, win_bg_mode)
 import live2d_assets
@@ -467,8 +467,15 @@ def main():
         '--disable-features=IntensiveWakeUpThrottling')
     screen_w, screen_h = get_screen_size()
     win_w, win_h = 300, 480
-    x = screen_w - win_w - 40
-    y = screen_h - win_h - 120
+    # get_screen_size() 是物理像素，pywebview 的 create_window(x=,y=) 按
+    # 逻辑像素消费（内部乘 DPI scale 转物理）—— 直接传会把坐标放大 scale
+    # 倍：150% 缩放 + 2560 主屏时 x=2220 被放到物理 3330，单屏下窗口整个
+    # 在屏幕右侧之外；双屏拼接落进第二块屏，所以这个 bug 一直没暴露。
+    # 窗口的物理尺寸是 win_w*scale（300x480 逻辑 -> 450x720 物理），
+    # 右下角对齐要按物理尺寸算，再除回 scale 转成逻辑像素（v0.3.15）。
+    _scale = get_dpi_scale()
+    x = int((screen_w - win_w * _scale - 40) / _scale)
+    y = int((screen_h - win_h * _scale - 120) / _scale)
     api = WindowAPI()
     _api_ref = api                 # push_message 借此检查 JS 心跳
     api.set_click_handler(_pick_click_line)   # 点角色 -> 取一句台词

@@ -89,6 +89,51 @@ def get_screen_size():
         return (1920, 1080)
 
 
+def get_dpi_scale(hwnd=None):
+    """返回物理像素/逻辑像素的比例（150% 缩放 -> 1.5，量不到按 1.0）。
+
+    为什么必须有它（v0.3.15 单屏不可见的根因）：
+    pywebview 的 create_window(x=,y=) / move() 把坐标当**逻辑像素**，
+    内部按窗口所在屏的 DPI 乘回物理（winforms.py: Location = Point(x*scale)）；
+    而 get_screen_size()/get_virtual_screen() 在 DPI-aware 进程里拿到的是
+    **物理像素**。两套坐标系直接混用，坐标会被放大 scale 倍 —— 150% 缩放
+    + 2560 主屏时 x=2220 被放到物理 3330，窗口整个落到屏幕右侧之外
+    （双屏拼接时落进第二块屏，所以双屏一直"看起来正常"）。
+    """
+    if sys.platform != 'win32':
+        return 1.0
+    try:
+        # GetDpiForSystem 在 DPI-unaware 进程里恒返回 96（scale 恒 1.0，
+        # 量了个寂寞）。本函数必须自包含、与调用顺序无关 —— 先确保 awareness。
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            pass  # 已设置过会返回错误码，正常
+        u = ctypes.windll.user32
+        dpi = 0
+        if hwnd:
+            try:
+                dpi = u.GetDpiForWindow(int(hwnd))
+            except Exception:
+                dpi = 0
+        if not dpi:
+            try:
+                dpi = u.GetDpiForSystem()
+            except Exception:
+                dpi = 0
+        if dpi > 0:
+            scale = dpi / 96.0
+        else:
+            # 老系统兜底：GetScaleFactorForDevice 返回百分比（100/125/150...）
+            try:
+                scale = max(1, ctypes.windll.shcore.GetScaleFactorForDevice(0)) / 100.0
+            except Exception:
+                scale = 1.0
+        return scale if scale >= 1.0 else 1.0
+    except Exception:
+        return 1.0
+
+
 # ---------------------------------------------------------------------------
 # 窗口控制（pywebview js_api）
 # ---------------------------------------------------------------------------
@@ -198,10 +243,24 @@ class WindowAPI:
         try:
             # 拖拽钳制：至少留 60px 在虚拟桌面内，防止把桌宠拖出屏幕找不回来。
             # 钳制失败（非 Windows/度量异常）就按原坐标移 —— 移动永远不能挂。
+            #
+            # 坐标系必须统一（v0.3.15）：x/y 与 win_w/win_h 来自 pywebview，
+            # 是**逻辑像素**；get_virtual_screen() 在 DPI-aware 进程里给的是
+            # **物理像素**。150% 缩放下直接拿物理边界钳逻辑坐标，右/下边界
+            # 的钳制永远够不到（逻辑值 < 物理边界）→ 等于没有钳制，桌宠
+            # 照样能被拖出屏幕。先把边界除以 scale 转成逻辑再钳。
             vs = get_virtual_screen()
             if vs is not None:
                 win_w = int(getattr(self._window, 'width', 0) or 300)
                 win_h = int(getattr(self._window, 'height', 0) or 450)
+                hwnd = None
+                try:
+                    hwnd = self._window.native.Handle
+                except Exception:
+                    hwnd = None
+                scale = get_dpi_scale(hwnd)
+                if scale != 1.0:
+                    vs = tuple(v / scale for v in vs)
                 x, y = clamp_to_virtual_screen(int(x), int(y), win_w, win_h, vs)
             self._window.move(int(x), int(y))
         except Exception as exc:
