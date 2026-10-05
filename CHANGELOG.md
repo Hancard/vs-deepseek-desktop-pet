@@ -1,5 +1,31 @@
 # Change Log
 
+## [0.3.17] — 2026-10-05
+
+> 新功能：桌宠主动监视当前打开文件的 bug。此前桌宠只在**诊断发生变化的那一
+> 刻**说话（签名去重），文件里的存量 bug 一直没人提。
+
+### Added
+- **当前文件 bug 监视（file scan watchdog）**：每 10 秒检查一次当前激活
+  编辑器的文件（C/C++/Python），并按下面规则说话：
+  * bug 内容/数量**变化** → 立刻播报，并点名前 3 条的行号与内容
+  * 数量**未变但仍有 bug** → 每 60 秒提醒一次（换一套提醒台词，防刷屏）
+  * 修到 **0** → 说一次"文件干净了"，之后保持沉默
+  * 切文件自动跟随；干净文件不打扰
+- 新增配置项：`airiMonitor.fileScan.enabled`（默认 true）、
+  `airiMonitor.fileScan.repeatIntervalSec`（默认 60，最小 10）
+- 语料新增 file_scan / file_remind / file_clear 三个场景；
+  DeepSeek 路径同步支持 file_scan 提示词
+
+### Fixed
+- `classify_error_category()` 直接对 `message` 调 `.lower()`：外部 /push 传
+  数字（`sample_errors: [{message: 123}]`）会 AttributeError 崩断连接。
+  这是 v0.3.14 加固的更深一层——元素本身是 dict，但**字段值**类型不可信
+- `sample_errors` 传字符串时被按字符拆成多条（"oops" → o/o/p/s），
+  气泡里出现"第?行：o"这类垃圾，现在整体当一条
+- `categorize_errors()` 跳过非 dict 元素（公共 API 不只走 generate_response）
+- file_scan 在无后端（response_generator 导入失败）时也有内置兜底台词
+
 ## [0.3.16] — 2026-10-05
 
 > VS Code 本体重装后可用版本为 1.83.1（update CDN 的 latest 只提供 1.83.1，
