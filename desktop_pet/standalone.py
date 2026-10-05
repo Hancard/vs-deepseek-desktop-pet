@@ -175,12 +175,34 @@ def _pick_click_line(zone):
     _last_pick[zone] = idx
     return pool[idx]
 
-def _builtin_reply(error_count):
+def _builtin_reply(error_count, trigger='diagnostics', file='', items=None):
     """后端（response_generator）不可用时的内置兜底台词。
 
     diagnostics 与 trigger/all_clear 两条推送分支共用 —— 后者此前漏了兜底，
     all_clear 在无后端时被静默吞掉（用户修好了 bug 却毫无反应）。
+
+    file_scan（当前文件 bug 播报）同样要有兜底：无后端时也能说出
+    文件名、数量和前几条 bug 的行号内容。
     """
+    if trigger == 'file_scan':
+        fname = file or '当前文件'
+        if error_count > 0:
+            detail = ''
+            if isinstance(items, list):
+                parts = []
+                for it in items[:3]:
+                    if isinstance(it, dict):
+                        parts.append('第%s行：%s' % (
+                            it.get('line', '?'), str(it.get('message', ''))[:40]))
+                detail = '；'.join(parts)
+            text = '%s 里还躺着 %d 个 bug，别装没看见！%s' % (
+                fname, error_count, (' ' + detail) if detail else '')
+            push_message('errorAlert', text, 'angry')
+        else:
+            push_message('chatMessage',
+                         '%s 干净了，零 bug。哼，勉强表扬你一下。' % fname,
+                         'happy')
+        return
     if error_count > 0:
         push_message('errorAlert', f"喂！{error_count} 个错误！给我认真点检查！", 'angry')
     else:
@@ -307,7 +329,8 @@ class AiriHandler(BaseHTTPRequestHandler):
                     if r:
                         push_message(r.get('type', 'chatMessage'), r.get('payload', {}).get('text', ''), r.get('payload', {}).get('emotion', 'idle'))
                 else:
-                    _builtin_reply(ctx['error_count'])
+                    _builtin_reply(ctx['error_count'], ctx.get('trigger', 'diagnostics'),
+                                   '', ctx.get('sample_errors'))
             elif 'trigger' in msg or 'error_count' in msg:
                 if _backend_available:
                     r = generate_response(msg)
@@ -318,7 +341,8 @@ class AiriHandler(BaseHTTPRequestHandler):
                         _ec = int(msg.get('error_count', 0) or 0)
                     except (TypeError, ValueError):
                         _ec = 0
-                    _builtin_reply(_ec)
+                    _builtin_reply(_ec, msg.get('trigger', 'diagnostics'),
+                                   msg.get('file'), msg.get('sample_errors'))
             else:
                 push_message('chatMessage', msg.get('message', body), 'idle')
             self._json_response({'status': 'pushed'})

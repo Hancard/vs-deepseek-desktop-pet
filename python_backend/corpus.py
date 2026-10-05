@@ -78,12 +78,37 @@ ENCOURAGE = [
     "哼，虽然你这人挺笨的，但认真起来也不是没救嘛。",
 ]
 
+# 当前文件 bug 播报场景（file_scan，bug 内容有变化时）
+FILE_SCAN = [
+    "喂，{file} 里还躺着 {count} 个 bug，别装没看见！",
+    "{file} 的 bug 有 {count} 个…你是打算留着过年吗？",
+    "咳咳，{file} 第 {line} 行附近有问题。才、才不是特意帮你看的！",
+    "{count} 个错误就在 {file} 里，你还悠哉悠哉的？",
+    "哼，{file} 病得不轻（{count} 个 bug）。从第 {line} 行开始修吧。",
+]
+
+# 当前文件 bug 未变化的重复提醒（file_scan remind）
+FILE_REMIND = [
+    "那 {count} 个 bug 还在 {file} 里呢，我可都记着账的。",
+    "提醒一下，{file} 的 {count} 个错误一个都没少。别想蒙混过关！",
+    "还在偷懒？{file} 里 {count} 个 bug 正盯着你看呢。",
+    "…我不是唠叨，只是 {file} 的 {count} 个 bug 让我无法沉默。",
+]
+
+# 当前文件修干净场景（file_scan 清零）
+FILE_CLEAR = [
+    "{file} 干净了，零 bug。哼，勉强表扬你一下。",
+    "{file} 的错误全修完了？算你有点本事…才不是夸你呢！",
+    "好哦，{file} 清清爽爽。继续保持，别让我逮到新错误！",
+]
+
 
 def get_all_scenes():
     """返回所有场景名称列表"""
     return [
         "syntax_error", "type_error", "import_error", "name_error",
-        "many_errors", "all_clear", "greeting", "idle", "encourage"
+        "many_errors", "all_clear", "greeting", "idle", "encourage",
+        "file_scan", "file_remind", "file_clear",
     ]
 
 
@@ -99,6 +124,9 @@ def get_scene_name(category: str) -> str:
         "greeting": "启动问候",
         "idle": "空闲提示",
         "encourage": "鼓励",
+        "file_scan": "文件bug播报",
+        "file_remind": "文件bug提醒",
+        "file_clear": "文件修干净",
     }
     return names.get(category, "未知场景")
 
@@ -116,6 +144,9 @@ EMOTION_MAP = {
     "greeting": "greeting",
     "idle": "idle",
     "encourage": "happy",
+    "file_scan": "angry",
+    "file_remind": "idle",
+    "file_clear": "happy",
 }
 
 

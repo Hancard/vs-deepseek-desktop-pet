@@ -26,13 +26,18 @@ from typing import Optional
 from corpus import (
     SYNTAX_ERROR, TYPE_ERROR, IMPORT_ERROR, NAME_ERROR,
     MANY_ERRORS, ALL_CLEAR, GREETING, IDLE, ENCOURAGE,
+    FILE_SCAN, FILE_REMIND, FILE_CLEAR,
     get_emotion,
 )
 
 
 def classify_error_category(message: str, source: str = "") -> str:
-    """根据错误消息文本推断错误类别"""
-    msg_lower = message.lower()
+    """根据错误消息文本推断错误类别
+
+    注意：外部 /push 传来的 sample_errors 里 message 可能是数字/None，
+    直接 .lower() 会 AttributeError 崩掉整个推送（连接被断）。全部转 str。
+    """
+    msg_lower = str(message if message is not None else "").lower()
 
     # 匹配顺序：具体的类别优先。
     # type 的 "is not" 是宽泛前缀，必须放在 name/import 之后，
@@ -67,10 +72,12 @@ def categorize_errors(errors: list) -> str:
 
     counts = {}
     for err in errors:
+        if not isinstance(err, dict):
+            continue
         cat = classify_error_category(err.get("message", ""), err.get("source", ""))
         counts[cat] = counts.get(cat, 0) + 1
 
-    return max(counts, key=counts.get)
+    return max(counts, key=counts.get) if counts else "syntax_error"
 
 
 def pick_corpus(category: str, variables: dict = None) -> str:
@@ -85,6 +92,9 @@ def pick_corpus(category: str, variables: dict = None) -> str:
         "greeting": GREETING,
         "idle": IDLE,
         "encourage": ENCOURAGE,
+        "file_scan": FILE_SCAN,
+        "file_remind": FILE_REMIND,
+        "file_clear": FILE_CLEAR,
     }
 
     lines = corpus_map.get(category, ENCOURAGE)
@@ -122,7 +132,9 @@ def try_deepseek_api(context: dict) -> Optional[str]:
         sample_errors = context.get("sample_errors", [])
         if sample_errors:
             for e in sample_errors[:3]:
-                sample_text += f"- {e.get('file', '')}:{e.get('line', '?')} → {e.get('message', '')}\n"
+                # file_scan 的条目只有 line/message，落回 context 里的文件名
+                loc = e.get("file") or context.get("file", "")
+                sample_text += f"- {loc}:{e.get('line', '?')} → {e.get('message', '')}\n"
 
         user_prompt = f"[触发事件: {trigger}] 当前错误数: {error_count}, 语言: {language}, 涉及文件: {', '.join(files[:3])}"
 
@@ -133,6 +145,18 @@ def try_deepseek_api(context: dict) -> Optional[str]:
             user_prompt += "\n请用傲娇的方式打招呼。"
         elif trigger == "all_clear":
             user_prompt += "\n程序员刚才把错误全修好了，请用傲娇的方式表示一下。"
+        elif trigger == "file_scan":
+            if error_count > 0:
+                user_prompt += (
+                    f"\n程序员当前打开的文件 {context.get('file', '')} 有 "
+                    f"{error_count} 个未修复的错误。请用傲娇的方式提醒，"
+                    "并点名最前面几处（行号+内容），一段话以内。"
+                )
+            else:
+                user_prompt += (
+                    f"\n程序员刚把 {context.get('file', '当前文件')} 的错误全部修好，"
+                    "请用傲娇方式表示认可，一句话即可。"
+                )
         elif trigger == "diagnostics":
             user_prompt += "\n程序员刚写了一堆错误，请用傲娇的方式吐槽并悄悄给出建议。"
 
@@ -178,15 +202,20 @@ def generate_response(context: dict) -> dict:
     language = context.get("language", "python")
     # sample_errors 元素不一定是 dict（外部 /push 可传字符串数组），
     # 统一归一化成 dict，categorize_errors / try_deepseek_api 都按 dict 消费
+    raw = context.get("sample_errors") or []
+    # sample_errors 本身是字符串时不能迭代它 —— 否则会被拆成单个字符
+    # （"oops" → 'o','o','p','s'，气泡里出现"第?行：o"这种垃圾）
+    if isinstance(raw, (str, bytes)):
+        raw = [raw]
     errors = [
         e if isinstance(e, dict) else {"message": str(e)}
-        for e in (context.get("sample_errors") or [])
+        for e in raw
         if isinstance(e, (dict, str, int, float, bool))
     ]
     context["sample_errors"] = errors
 
     # 确定消息类型
-    if trigger == "diagnostics" and error_count > 0:
+    if trigger in ("diagnostics", "file_scan") and error_count > 0:
         msg_type = "errorAlert"
     else:
         msg_type = "chatMessage"
@@ -198,6 +227,18 @@ def generate_response(context: dict) -> dict:
     elif trigger == "all_clear":
         emotion = "happy"
         category = "all_clear"
+    elif trigger == "file_scan":
+        # 当前文件 bug 播报：>0 按严重度选情绪；==0 视为文件修干净
+        if error_count > 0:
+            if error_count >= 5:
+                emotion = "surprised"
+                category = "many_errors"
+            else:
+                category = categorize_errors(errors)
+                emotion = get_emotion(category)
+        else:
+            emotion = "happy"
+            category = "file_clear"
     elif trigger == "diagnostics":
         if error_count >= 5:
             emotion = "surprised"
@@ -217,7 +258,34 @@ def generate_response(context: dict) -> dict:
         return {"type": msg_type, "payload": {"text": api_result, "emotion": emotion}}
 
     # Fallback: 从语料库抽取
-    if trigger == "diagnostics":
+    if trigger == "file_scan":
+        file_name = str(context.get("file", "") or "当前文件")
+        if error_count > 0:
+            # reason=remind 表示数量没变的周期提醒，换一套台词避免复读
+            reason = str(context.get("reason", "changed"))
+            if error_count >= 5:
+                corpus_key = "many_errors"
+            elif reason == "remind":
+                corpus_key = "file_remind"
+            else:
+                corpus_key = "file_scan"
+            variables = {"file": file_name, "count": error_count,
+                         "language": language}
+            if errors:
+                variables["line"] = errors[0].get("line", "?")
+                variables["lines"] = "、".join(
+                    "第%s行" % e.get("line", "?") for e in errors[:3])
+            text = pick_corpus(corpus_key, variables)
+            # 点名具体 bug（行号 + 内容，最多 3 条）
+            detail = "；".join(
+                "第%s行：%s" % (e.get("line", "?"),
+                                str(e.get("message", ""))[:40])
+                for e in errors[:3])
+            if detail:
+                text = text + " " + detail
+        else:
+            text = pick_corpus("file_clear", {"file": file_name})
+    elif trigger == "diagnostics":
         if error_count >= 5:
             text = pick_corpus("many_errors", {"count": error_count, "language": language})
         else:
