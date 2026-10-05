@@ -15,6 +15,11 @@
  *     → pushToStandalone(diagnosticsPayload)
  *       → POST http://127.0.0.1:19876/push
  *         → standalone 内建 generate_response → SSE → 桌宠气泡
+ *
+ *   当前文件 bug 监视（file scan watchdog，10s tick）→ scanActiveFile
+ *     → 只盯激活编辑器：bug 变化立刻推送；未变化每 60s 提醒；
+ *       修到 0 说一次"文件干净"后沉默
+ *     → POST /push {trigger: 'file_scan', file, error_count, sample_errors}
  */
 
 import * as vscode from 'vscode';
@@ -76,6 +81,14 @@ export function activate(context: vscode.ExtensionContext) {
 		handleDiagnosticsChanged();
 	});
 	context.subscriptions.push(diagnosticsDisposable);
+
+	// --- 当前文件 bug 监视（file scan watchdog）---
+	// 每 10 秒 tick 一次，只盯当前激活编辑器的文件：
+	//   * bug 数量/内容变化 → 立刻推送（新增/修复/清零都有反应）
+	//   * 没变化但仍有 bug → 每隔 repeatIntervalSec（默认 60s）提醒一次
+	//   * 修到 0 → 说一次"文件干净了"，之后保持沉默
+	const scanTimer = setInterval(() => { scanActiveFile(); }, FILE_SCAN_TICK_MS);
+	context.subscriptions.push(new vscode.Disposable(() => clearInterval(scanTimer)));
 
 	// --- 启动时扫描已有诊断（有错误才处理，干净启动不打扰） ---
 	// Webview 诊断面板改为按需打开：命令 "Open Anime Assistant"
@@ -157,6 +170,97 @@ function collectErrors(uris?: readonly vscode.Uri[]): ErrorItem[] {
 	}
 	return items;
 }
+
+// ============================================================================
+// scanActiveFile() — 当前文件 bug 监视（file scan watchdog）
+// ============================================================================
+
+/** file scan 轮询 tick：10 秒一次（真正说话的时机由"变化 + 冷却期"决定） */
+const FILE_SCAN_TICK_MS = 10000;
+
+/** 每个文件的监视状态（只保留最近一个文件） */
+interface FileScanState {
+	uri: string;
+	/** bug 内容签名（行号+消息，排序后拼接），变化即推送 */
+	signature: string;
+	count: number;
+	lastPushAt: number;
+}
+let fileScanState: FileScanState | undefined;
+
+function fileScanConfig(): { enabled: boolean; repeatSec: number } {
+	const cfg = vscode.workspace.getConfiguration('airiMonitor');
+	const repeat = cfg.get<number>('fileScan.repeatIntervalSec', 60);
+	return {
+		enabled: cfg.get<boolean>('fileScan.enabled', true),
+		repeatSec: Number.isFinite(repeat) ? Math.max(10, repeat) : 60,
+	};
+}
+
+/** 错误消息截断：只取首行、最多 60 字符，避免气泡塞进整段 traceback */
+function clipMessage(message: string, maxLen = 60): string {
+	const oneLine = message.split('\n')[0] ?? '';
+	return oneLine.length > maxLen ? oneLine.slice(0, maxLen - 1) + '…' : oneLine;
+}
+
+function scanActiveFile(): void {
+	const { enabled, repeatSec } = fileScanConfig();
+	if (!enabled) { return; }
+
+	const editor = vscode.window.activeTextEditor;
+	// 只盯真实磁盘文件（untitled/output/webview 面板跳过）
+	if (!editor || editor.document.uri.scheme !== 'file') { return; }
+	const languageId = editor.document.languageId;
+	if (!supportedLanguageIds.has(languageId)) { return; }
+
+	const uri = editor.document.uri;
+	const errors = collectErrors([uri]);
+	const signature = errors.map((e) => `${e.line}|${e.message}`).sort().join(';');
+	const count = errors.length;
+	const now = Date.now();
+	const prev = fileScanState && fileScanState.uri === uri.toString() ? fileScanState : undefined;
+
+	const changed = !prev || prev.signature !== signature;
+	let shouldPush: boolean;
+	if (changed) {
+		// 0 → 0 的"变化"（例如切到一个本来就干净的文件）不打扰
+		shouldPush = !(count === 0 && (!prev || prev.count === 0));
+	} else {
+		// 数量没变但仍有 bug：超过冷却期就再提醒一次
+		shouldPush = count > 0 && now - prev!.lastPushAt >= repeatSec * 1000;
+	}
+
+	if (!shouldPush) {
+		if (changed) {
+			fileScanState = { uri: uri.toString(), signature, count, lastPushAt: prev?.lastPushAt ?? now };
+		}
+		return;
+	}
+	fileScanState = { uri: uri.toString(), signature, count, lastPushAt: now };
+
+	const message = {
+		trigger: 'file_scan' as const,
+		// reason: changed = bug 内容有变化（新增/修复/清零）；remind = 超时重复提醒
+		reason: changed ? 'changed' : 'remind',
+		file: path.basename(uri.fsPath),
+		error_count: count,
+		prev_count: prev ? prev.count : count,
+		language: languageId,
+		sample_errors: errors.slice(0, 3).map((e) => ({
+			line: e.line,
+			message: clipMessage(e.message),
+		})),
+		timestamp: new Date().toISOString(),
+	};
+
+	void (async () => {
+		if (await checkStandaloneAlive()) { pushToStandalone(message); }
+	})();
+}
+
+// ============================================================================
+// handleDiagnosticsChanged()
+// ============================================================================
 
 function handleDiagnosticsChanged(): void {
 	// all_clear 必须按工作区整体判断：

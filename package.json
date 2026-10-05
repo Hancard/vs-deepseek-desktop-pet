@@ -2,7 +2,7 @@
   "name": "vscode-anime-assistent",
   "displayName": "airi-monitor",
   "description": "Anime desktop pet for VS Code — tsundere Airi watches your code and roasts your bugs",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "publisher": "123457890wasd-cmyk",
   "repository": {
     "type": "git",
@@ -28,7 +28,23 @@
         "command": "vscode-anime-assistent.launchPet",
         "title": "Launch Airi Desktop Pet"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Airi Monitor",
+      "properties": {
+        "airiMonitor.fileScan.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "桌宠主动监视当前打开文件的 bug：变化立刻播报，未变化定期提醒，修到 0 说一次\"干净了\"后沉默"
+        },
+        "airiMonitor.fileScan.repeatIntervalSec": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "description": "当前文件 bug 数量未变化时的重复提醒间隔（秒，最小 10）"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
