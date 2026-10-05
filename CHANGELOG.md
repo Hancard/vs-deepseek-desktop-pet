@@ -1,5 +1,26 @@
 # Change Log
 
+## [0.3.14] — 2026-10-05
+
+> 例行审计轮。桌宠已重启（VSIX 0.3.12 运行日志健康，v0.3.8–12 运行时修复
+> 全部生效）。本轮补审最后一块未覆盖区域：python_backend/ 全部四个文件。
+
+### Fixed
+- **response_generator.py 外部输入加固**（python_backend/）：`generate_response`
+  是后端 stdio 路径与 standalone /push 路径共用的大脑，但对外部输入不设防——
+  * `sample_errors` 元素非 dict（外部 /push 可传 `items: ["字符串"]`）时
+    `categorize_errors` 的 `err.get()` 直接 AttributeError
+  * `error_count` 传字符串（`{"trigger": "diagnostics", "error_count": "3"}`
+    走 standalone 的 trigger 直通路径）时 `error_count >= 5` 抛 TypeError
+  修法：入口处统一归一化——`error_count` 强转 int（失败归 0），
+  `sample_errors` 非 dict 元素包成 `{"message": str(e)}`，非法类型丢弃；
+  归一化后的列表写回 context，`try_deepseek_api` 同样受益。
+
+### Tests
+- 新增 `live2d_probe/test_response_generator_hardening.py`：单元层 7 用例
+  （字符串错误数组、混合类型、count 字符串/None、归一化分类正确性）+
+  真服务器 HTTP 端到端 3 用例 + 队列内容合法性检查，13 项全 PASS。
+
 ## [0.3.13] — 2026-10-04
 
 > 用户请求：继续检查 bug 并修复 push（例行审计轮）。审计覆盖此前未读过的
