@@ -1,5 +1,32 @@
 # Change Log
 
+## [0.3.15] — 2026-10-05
+
+> 用户报：桌宠能启动但看不到前端页面，双屏可见、单屏不可见。
+> 根因是 DPI 双重缩放，与屏幕数量只是间接相关。
+
+### Fixed
+- **DPI 双重缩放把初始位置放出屏幕外**（desktop_pet/standalone.py、main.py、
+  common.py）：pywebview 的 `create_window(x=,y=)`/`move()` 按逻辑像素消费
+  （winforms.py 内部 `Location = Point(x * GetDpiForWindow/96)`），而
+  `get_screen_size()` 在 DPI-aware 进程里返回**物理像素**。150% 缩放 +
+  2560 主屏时 x=2220 被放到物理 3330 —— 窗口整个在屏幕右侧之外。
+  双屏拼接（虚拟桌面 4267 宽）时落进第二块屏所以一直"看起来正常"，
+  单屏立刻暴露。
+  - `common.get_dpi_scale(hwnd=None)`：GetDpiForWindow -> GetDpiForSystem
+    -> GetScaleFactorForDevice 三级兜底；自带 SetProcessDpiAwareness，
+    与调用顺序无关
+  - 初始位置改为按物理尺寸（win_w*scale）右下对齐后除回 scale 转逻辑
+  - `move_window` 拖拽钳制同步修坐标系：物理虚拟桌面边界先除 scale 转
+    逻辑再钳 —— 修复前 150% 缩放下右/下边界钳制失效，单屏也能把桌宠
+    拖出屏幕找不回来
+
+### Tests
+- 新增 `live2d_probe/test_window_dpi.py`：真 pywebview 窗口 + GetWindowRect
+  量物理矩形，断言完整落在主屏物理范围内、物理尺寸=逻辑尺寸×scale、
+  逻辑位置回读一致。修复前旧公式在本机（150%）实测越界 FAIL，修复后
+  ALL PASS。需系统 Python 3.12（pywebview）。
+
 ## [0.3.14] — 2026-10-05
 
 > 例行审计轮。桌宠已重启（VSIX 0.3.12 运行日志健康，v0.3.8–12 运行时修复
