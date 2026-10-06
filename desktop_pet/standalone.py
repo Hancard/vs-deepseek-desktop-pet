@@ -175,14 +175,15 @@ def _pick_click_line(zone):
     _last_pick[zone] = idx
     return pool[idx]
 
-def _builtin_reply(error_count, trigger='diagnostics', file='', items=None):
+def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reason='changed'):
     """后端（response_generator）不可用时的内置兜底台词。
 
     diagnostics 与 trigger/all_clear 两条推送分支共用 —— 后者此前漏了兜底，
     all_clear 在无后端时被静默吞掉（用户修好了 bug 却毫无反应）。
 
     file_scan（当前文件 bug 播报）同样要有兜底：无后端时也能说出
-    文件名、数量和前几条 bug 的行号内容。
+    文件名、数量和前几条 bug 的行号内容。reason='remind' 表示 bug 数量
+    没变化的周期提醒，换一套说法避免与首播复读同一句。
     """
     if trigger == 'file_scan':
         fname = file or '当前文件'
@@ -195,8 +196,12 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None):
                         parts.append('第%s行：%s' % (
                             it.get('line', '?'), str(it.get('message', ''))[:40]))
                 detail = '；'.join(parts)
-            text = '%s 里还躺着 %d 个 bug，别装没看见！%s' % (
-                fname, error_count, (' ' + detail) if detail else '')
+            if reason == 'remind':
+                text = '%s 里那 %d 个 bug 还在呢，我可都记着账的。%s' % (
+                    fname, error_count, (' ' + detail) if detail else '')
+            else:
+                text = '%s 里还躺着 %d 个 bug，别装没看见！%s' % (
+                    fname, error_count, (' ' + detail) if detail else '')
             push_message('errorAlert', text, 'angry')
         else:
             push_message('chatMessage',
@@ -290,11 +295,18 @@ class AiriHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 return
-            body = self.rfile.read(length).decode('utf-8')
+            body = self.rfile.read(length).decode('utf-8', errors='replace')
             try:
                 msg = json.loads(body)
             except Exception:
                 push_message('chatMessage', body, 'idle')
+                self._json_response({'status': 'pushed'})
+                return
+            if not isinstance(msg, dict):
+                # body 是合法 JSON 但不是对象（数组/标量/null）：后面的
+                # 'payload' in msg / msg.get 会 TypeError/AttributeError 炸断
+                # 连接。与解析失败同路径——按原始文本进气泡，超长截断。
+                push_message('chatMessage', body[:500], 'idle')
                 self._json_response({'status': 'pushed'})
                 return
             if 'payload' in msg and 'text' in msg.get('payload', {}):
@@ -342,7 +354,8 @@ class AiriHandler(BaseHTTPRequestHandler):
                     except (TypeError, ValueError):
                         _ec = 0
                     _builtin_reply(_ec, msg.get('trigger', 'diagnostics'),
-                                   msg.get('file'), msg.get('sample_errors'))
+                                   msg.get('file'), msg.get('sample_errors'),
+                                   str(msg.get('reason', 'changed') or 'changed'))
             else:
                 push_message('chatMessage', msg.get('message', body), 'idle')
             self._json_response({'status': 'pushed'})
