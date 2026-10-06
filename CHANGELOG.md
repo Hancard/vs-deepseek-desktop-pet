@@ -1,5 +1,21 @@
 # Change Log
 
+## [0.3.18] — 2026-10-06
+
+> 名牌改名 deepseek + 布局紧凑化；/push 加固第二层。
+
+### Changed
+- 名牌文字 `Airi` → `deepseek`（角色 alt 文本同步）
+- 名牌上移约 12px 更贴角色：wrapper gap 归零、地面阴影上提、
+  名牌自身负 margin（region 与角色卡均按 getBoundingClientRect 实测，
+  上移自动跟随，无需改裁切逻辑）
+
+### Fixed
+- /push body 为合法 JSON 但非对象（数组/标量/null）时不再断连
+- /push body 非 UTF-8 时不再断连（decode errors='replace'）
+- file_scan 空 sample_errors 时 `{line}`/`{lines}` 占位符不再原样残留
+- 无后端兜底台词区分 remind/changed，周期提醒不再复读首播
+
 ## [0.3.17] — 2026-10-05
 
 > 新功能：桌宠主动监视当前打开文件的 bug。此前桌宠只在**诊断发生变化的那一
