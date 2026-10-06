@@ -12,13 +12,14 @@
  *
  * 【数据流】
  *   VS Code 诊断变化 → handleDiagnosticsChanged
- *     → pushToStandalone(diagnosticsPayload)
+ *     → 仅标记 diagPushPending（Webview 面板实时更新，桌宠不实时打扰）
+ *     → 桌宠响应时钟（30s 周期，唤醒时重置起点）→ pushPendingDiagnostics
  *       → POST http://127.0.0.1:19876/push
  *         → standalone 内建 generate_response → SSE → 桌宠气泡
  *
- *   当前文件 bug 监视（file scan watchdog，10s tick）→ scanActiveFile
- *     → 只盯激活编辑器：bug 变化立刻推送；未变化每 60s 提醒；
- *       修到 0 说一次"文件干净"后沉默
+ *   当前文件 bug 监视（file scan watchdog）→ scanActiveFile
+ *     → 与诊断推送共用同一个 30s 周期时钟（petTick）：
+ *       bug 变化推送；未变化每 60s 提醒；修到 0 说一次"文件干净"后沉默
  *     → POST /push {trigger: 'file_scan', file, error_count, sample_errors}
  */
 
@@ -82,13 +83,17 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push(diagnosticsDisposable);
 
-	// --- 当前文件 bug 监视（file scan watchdog）---
-	// 每 10 秒 tick 一次，只盯当前激活编辑器的文件：
-	//   * bug 数量/内容变化 → 立刻推送（新增/修复/清零都有反应）
-	//   * 没变化但仍有 bug → 每隔 repeatIntervalSec（默认 60s）提醒一次
-	//   * 修到 0 → 说一次"文件干净了"，之后保持沉默
-	const scanTimer = setInterval(() => { scanActiveFile(); }, FILE_SCAN_TICK_MS);
-	context.subscriptions.push(new vscode.Disposable(() => clearInterval(scanTimer)));
+	// --- 桌宠响应时钟（30s 周期）---
+	// 诊断变化与当前文件扫描共用这一个节奏：每 30 秒最多主动响应一批。
+	//   * 诊断变化只标脏（diagPushPending），tick 时才真正推送
+	//     —— 敲代码时每个字母触发的诊断事件不再实时打扰桌宠
+	//   * scanActiveFile 在同一 tick 里跑：bug 变化推送、未变化按冷却提醒、
+	//     修到 0 说一次"干净了"后沉默
+	// 桌宠被唤醒（launchStandalonePet 成功）时重置计时起点。
+	startPetTick();
+	context.subscriptions.push(new vscode.Disposable(() => {
+		if (petTickTimer) { clearInterval(petTickTimer); petTickTimer = undefined; }
+	}));
 
 	// --- 启动时扫描已有诊断（有错误才处理，干净启动不打扰） ---
 	// Webview 诊断面板改为按需打开：命令 "Open Anime Assistant"
@@ -175,8 +180,69 @@ function collectErrors(uris?: readonly vscode.Uri[]): ErrorItem[] {
 // scanActiveFile() — 当前文件 bug 监视（file scan watchdog）
 // ============================================================================
 
-/** file scan 轮询 tick：10 秒一次（真正说话的时机由"变化 + 冷却期"决定） */
-const FILE_SCAN_TICK_MS = 10000;
+/** 桌宠主动响应周期：30 秒一拍（用户指定）。
+ * 诊断变化只标脏，真正的推送在这一拍里做——敲代码时的每次诊断事件
+ * 都不再实时打扰；"以桌宠被唤醒开始计时"由 launchStandalonePet 成功后
+ * 调 startPetTick() 重置起点实现。 */
+const PET_TICK_MS = 30000;
+
+/** 响应时钟句柄（startPetTick 重置起点用） */
+let petTickTimer: NodeJS.Timeout | undefined;
+
+/** 诊断是否有未推送到桌宠的变化（petTick 消费后清零） */
+let diagPushPending = false;
+
+/** 启动/重置桌宠响应时钟（30s 从现在起算） */
+function startPetTick(): void {
+	if (petTickTimer) { clearInterval(petTickTimer); }
+	petTickTimer = setInterval(petTick, PET_TICK_MS);
+}
+
+/** 桌宠响应时钟的一拍：先消费诊断推送，再做当前文件扫描 */
+function petTick(): void {
+	if (diagPushPending) {
+		diagPushPending = false;
+		void pushPendingDiagnostics();
+	}
+	scanActiveFile();
+}
+
+/** 把积压的诊断状态推送到桌宠（原 handleDiagnosticsChanged 的推送逻辑，
+ *  从实时路径移入 30s 周期时钟） */
+async function pushPendingDiagnostics(): Promise<void> {
+	if (!(await checkStandaloneAlive())) { return; }
+	// 从未出现过受支持的错误时不推 all_clear（例如无关语言的诊断事件）
+	const workspaceErrors = collectErrors();
+	if (workspaceErrors.length === 0 && !hadRelevantErrors) { return; }
+
+	const message = workspaceErrors.length > 0
+		? {
+			type: 'diagnostics' as const,
+			payload: {
+				count: workspaceErrors.length,
+				items: workspaceErrors.slice(0, 20),
+				timestamp: new Date().toISOString(),
+				language: [...new Set(workspaceErrors.map((e) => e.languageId))].join(', '),
+			},
+		}
+		: {
+			trigger: 'all_clear' as const,
+			error_count: 0,
+			language: 'unknown',
+			files: [],
+			sample_errors: [],
+		};
+
+	// 相同错误状态不重复推送（避免每次诊断事件都让 Airi 重复吐槽）
+	const signature = JSON.stringify([
+		(message as { type?: string }).type ?? (message as { trigger?: string }).trigger,
+		workspaceErrors.map((e) => `${e.file}|${e.line}|${e.message}`),
+	]);
+	if (signature === lastPushSignature) { return; }
+	lastPushSignature = signature;
+
+	pushToStandalone(message);
+}
 
 /** 每个文件的监视状态（只保留最近一个文件） */
 interface FileScanState {
@@ -270,45 +336,15 @@ function handleDiagnosticsChanged(): void {
 	if (workspaceErrors.length > 0) { hadRelevantErrors = true; }
 
 	// 发送到 Webview 备用面板（同样使用工作区整体口径，避免误导）
+	// 面板是用户主动打开的，保持实时；桌宠气泡走 30s 响应时钟
 	postToWebview({
 		type: 'diagnostics',
 		payload: { count: workspaceErrors.length, items: workspaceErrors.slice(0, 20), timestamp: new Date().toISOString() }
 	});
 
-	// 推送到独立桌宠服务器（未运行时静默跳过，避免刷无意义请求）
-	void (async () => {
-		if (!(await checkStandaloneAlive())) { return; }
-		// 从未出现过受支持的错误时不推 all_clear（例如无关语言的诊断事件）
-		if (workspaceErrors.length === 0 && !hadRelevantErrors) { return; }
-
-		const message = workspaceErrors.length > 0
-			? {
-				type: 'diagnostics' as const,
-				payload: {
-					count: workspaceErrors.length,
-					items: workspaceErrors.slice(0, 20),
-					timestamp: new Date().toISOString(),
-					language: [...new Set(workspaceErrors.map((e) => e.languageId))].join(', '),
-				},
-			}
-			: {
-				trigger: 'all_clear' as const,
-				error_count: 0,
-				language: 'unknown',
-				files: [],
-				sample_errors: [],
-			};
-
-		// 相同错误状态不重复推送（避免每次诊断事件都让 Airi 重复吐槽）
-		const signature = JSON.stringify([
-			(message as { type?: string }).type ?? (message as { trigger?: string }).trigger,
-			workspaceErrors.map((e) => `${e.file}|${e.line}|${e.message}`),
-		]);
-		if (signature === lastPushSignature) { return; }
-		lastPushSignature = signature;
-
-		pushToStandalone(message);
-	})();
+	// 标脏即可：真正的推送在下一个 30s 响应 tick（petTick → pushPendingDiagnostics）。
+	// 此前这里是实时推送——每敲一个字母触发诊断变化，桌宠就收到并报一次。
+	diagPushPending = true;
 }
 
 // ============================================================================
@@ -402,6 +438,9 @@ async function launchStandalonePet(): Promise<void> {
 			lastHealthCheckAt = Date.now();
 			vscode.window.showInformationMessage('Airi 桌宠已启动，开始监视你的代码 (￣▽￣)');
 			void refreshPetStatus();
+			// 以桌宠被唤醒为起点重新计 30s：唤醒后先安静一个周期，
+			// 之后每 30s 才主动响应一次
+			startPetTick();
 			return;
 		}
 	}
