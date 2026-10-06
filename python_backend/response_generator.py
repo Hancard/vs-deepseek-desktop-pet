@@ -269,8 +269,11 @@ def generate_response(context: dict) -> dict:
                 corpus_key = "file_remind"
             else:
                 corpus_key = "file_scan"
+            # line/lines 必须预置默认值：FILE_SCAN 语料两条含 {line}，
+            # 外部 /push 传 error_count>0 而 sample_errors 为空时
+            # pick_corpus 的 replace 找不到键，占位符会原样残留进气泡
             variables = {"file": file_name, "count": error_count,
-                         "language": language}
+                         "language": language, "line": "?", "lines": "?"}
             if errors:
                 variables["line"] = errors[0].get("line", "?")
                 variables["lines"] = "、".join(
