@@ -141,7 +141,7 @@
     /* ===== 角色立绘区（拖拽手柄） ===== */
     .character-wrapper {
       display: flex; flex-direction: column;
-      align-items: center; gap: 2px;
+      align-items: center; gap: 0;
       flex-shrink: 0;   /* 气泡变高时立绘不许被压扁 */
       cursor: grab; padding: 6px;
       border-radius: 16px; transition: background 0.25s;
@@ -259,7 +259,7 @@
     /* 地面阴影 */
     .ground-shadow {
       width: 90px; height: 14px;
-      margin-top: -8px;
+      margin-top: -12px;   /* 上提贴近角色，名牌随之上移（布局紧凑化） */
       background: radial-gradient(ellipse, rgba(0,0,0,0.35) 0%, transparent 70%);
       border-radius: 50%;
       animation: shadowPulse 4s infinite ease-in-out;
@@ -506,7 +506,8 @@
        现在由页面自己画板（圆角 + 深蓝黑），region 按同圆角裁，与气泡同构。 */
     .pet-plate {
       display: flex; flex-direction: column; align-items: center;
-      padding: 3px 12px 4px;
+      padding: 2px 12px 3px;
+      margin-top: -6px;   /* 再往上拉，缩小与角色卡的间距 */
       border-radius: 10px;
       background: #161a2e;
       border: 1px solid rgba(255, 107, 157, 0.28);
@@ -618,7 +619,7 @@
       <!-- Live2D 舞台（素材可用时接管角色位；失败则退回下面的图片/CSS 角色） -->
       <div class="live2d-stage" id="live2dStage"></div>
       <!-- 自定义图片（优先级最高） -->
-      <img id="charImg" src="" alt="Airi" style="display:none" />
+      <img id="charImg" src="" alt="deepseek" style="display:none" />
       <!-- CSS 默认角色 -->
       <div class="css-character visible" id="cssChar">
         <div class="chibi-hair"></div>
@@ -637,7 +638,7 @@
     </div>
     <div class="ground-shadow"></div>
     <div class="pet-plate" id="petPlate">
-      <div class="pet-name">Airi</div>
+      <div class="pet-name">deepseek</div>
       <div class="pet-status">
         <span class="dot" id="dot"></span><span id="statusLabel">connecting...</span>
       </div>
