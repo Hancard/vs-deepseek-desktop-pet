@@ -64,6 +64,26 @@ out('[%s] unit:str-error-classified (emotion=%s)' % ('PASS' if ok else 'FAIL', r
 if not ok:
     fail += 1
 
+# file_scan 且 sample_errors 为空：语料占位符 {line}/{lines} 不许原样残留
+# （pick_corpus 用 str.replace，缺变量会留着 "{line}" 进气泡）
+r = generate_response({'trigger': 'file_scan', 'file': 'a.py',
+                       'error_count': 3, 'sample_errors': []})
+ok = ('{line}' not in r['payload']['text'] and '{lines}' not in r['payload']['text']
+      and '{file}' not in r['payload']['text'] and '{count}' not in r['payload']['text'])
+out('[%s] unit:file_scan-empty-errors-no-placeholder text=%r' % (
+    'PASS' if ok else 'FAIL', r['payload']['text'][:36]))
+if not ok:
+    fail += 1
+
+# remind 与 changed 在 many_errors 之外的语料分支要能区分（都不许抛、不许留占位符）
+for reason in ('remind', 'changed'):
+    r = generate_response({'trigger': 'file_scan', 'file': 'b.py',
+                           'error_count': 2, 'reason': reason, 'sample_errors': []})
+    ok = '{' not in r['payload']['text']
+    out('[%s] unit:file_scan-%s text=%r' % ('PASS' if ok else 'FAIL', reason, r['payload']['text'][:30]))
+    if not ok:
+        fail += 1
+
 # ---------- 2. 端到端：起真服务器，/push 走完整链路 ----------
 import standalone  # noqa: E402
 

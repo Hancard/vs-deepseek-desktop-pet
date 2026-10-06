@@ -83,9 +83,26 @@ for name, payload in cases:
     if not ok:
         fail += 1
 
+# ---------- 1.5 body 本身不是 JSON 对象：合法 JSON 数组/标量/null、非 UTF-8 ----------
+# json.loads 成功 ≠ dict：'payload' in msg / msg.get 在 list/int/None 上
+# 抛 TypeError/AttributeError，此前未捕获直接断连；decode 也可能 UnicodeDecodeError。
+raw_cases = [
+    ('body-array', b'[1,2,3]'),
+    ('body-int', b'123'),
+    ('body-null', b'null'),
+    ('body-str', b'"just a string"'),
+    ('body-binary', b'\xff\xfe\xfd not utf8 \xc3\x28'),
+]
+for name, raw in raw_cases:
+    st, resp = post('/push', raw)
+    ok = (st == 200 and resp == {'status': 'pushed'})
+    out('[%s] %s status=%r resp=%r' % ('PASS' if ok else 'FAIL', name, st, resp))
+    if not ok:
+        fail += 1
+
 # ---------- 2. 畸形内容进队列后必须合法（text 可读、非崩源） ----------
 time.sleep(0.2)
-tail = last_n(9)
+tail = last_n(14)
 texts = []
 for seq, raw in tail:
     try:
@@ -125,6 +142,23 @@ for seq, raw in tail2:
     m = json.loads(raw)
     out('  final queue: type=%s text=%r emotion=%s'
         % (m['type'], m['payload']['text'][:30], m['payload']['emotion']))
+
+# ---------- 3.5 _builtin_reply 兜底：remind 与 changed 台词必须区分 ----------
+before = len(snapshot())
+standalone._builtin_reply(2, 'file_scan', 'x.py', [], 'remind')
+standalone._builtin_reply(2, 'file_scan', 'x.py', [], 'changed')
+time.sleep(0.2)
+pair = snapshot()[before:]
+remind_texts = []
+changed_texts = []
+for seq, raw in pair:
+    m = json.loads(raw)
+    (remind_texts if '记着账' in m['payload']['text'] else changed_texts).append(m['payload']['text'])
+ok = len(remind_texts) == 1 and len(changed_texts) == 1
+out('[%s] builtin-reply-remind-vs-changed remind=%r changed=%r' % (
+    'PASS' if ok else 'FAIL', remind_texts[:1], changed_texts[:1]))
+if not ok:
+    fail += 1
 
 out('')
 out('RESULT: %s (%d failures)' % ('ALL PASS' if fail == 0 else 'FAILED', fail))
