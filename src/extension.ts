@@ -84,11 +84,13 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(diagnosticsDisposable);
 
 	// --- 桌宠响应时钟（30s 周期）---
-	// 诊断变化与当前文件扫描共用这一个节奏：每 30 秒最多主动响应一批。
+	// 诊断变化与当前文件扫描共用这一个节奏：每 30 秒最多主动说一条。
 	//   * 诊断变化只标脏（diagPushPending），tick 时才真正推送
 	//     —— 敲代码时每个字母触发的诊断事件不再实时打扰桌宠
 	//   * scanActiveFile 在同一 tick 里跑：bug 变化推送、未变化按冷却提醒、
 	//     修到 0 说一次"干净了"后沉默
+	//   * 两条路径同拍都想说话时当前文件优先（诊断脏标记留到下一拍，
+	//     避免一拍冒两个气泡）
 	// 桌宠被唤醒（launchStandalonePet 成功）时重置计时起点。
 	startPetTick();
 	context.subscriptions.push(new vscode.Disposable(() => {
@@ -198,22 +200,30 @@ function startPetTick(): void {
 	petTickTimer = setInterval(petTick, PET_TICK_MS);
 }
 
-/** 桌宠响应时钟的一拍：先消费诊断推送，再做当前文件扫描 */
+/** 桌宠响应时钟的一拍：**一拍只说一条**。
+ *  优先当前文件（更具体、带行号），它没话说时才轮到工作区诊断。
+ *  两条同拍都推 = 气泡瞬间叠两个（前端 MAX_BUBBLES=2），
+ *  违背"每 30 秒主动响应一次"的约定。 */
 function petTick(): void {
-	if (diagPushPending) {
-		diagPushPending = false;
-		void pushPendingDiagnostics();
-	}
-	scanActiveFile();
+	if (scanActiveFile()) { return; }
+	if (!diagPushPending) { return; }
+	diagPushPending = false;
+	void pushPendingDiagnostics().then((consumed) => {
+		// 桌宠没起来 / 探测失败：把脏标记放回去，下一拍再试。
+		// 旧写法无条件清标记 —— 桌宠未运行时这批诊断变化被静默吞掉，
+		// 之后即使桌宠起来了也再不会补报（用户看不到"有 N 个错误"）。
+		if (!consumed) { diagPushPending = true; }
+	});
 }
 
 /** 把积压的诊断状态推送到桌宠（原 handleDiagnosticsChanged 的推送逻辑，
- *  从实时路径移入 30s 周期时钟） */
-async function pushPendingDiagnostics(): Promise<void> {
-	if (!(await checkStandaloneAlive())) { return; }
+ *  从实时路径移入 30s 周期时钟）
+ *  @returns 本批是否已消费（false = 桌宠不可达，调用方需保留脏标记） */
+async function pushPendingDiagnostics(): Promise<boolean> {
+	if (!(await checkStandaloneAlive())) { return false; }
 	// 从未出现过受支持的错误时不推 all_clear（例如无关语言的诊断事件）
 	const workspaceErrors = collectErrors();
-	if (workspaceErrors.length === 0 && !hadRelevantErrors) { return; }
+	if (workspaceErrors.length === 0 && !hadRelevantErrors) { return true; }
 
 	const message = workspaceErrors.length > 0
 		? {
@@ -238,10 +248,11 @@ async function pushPendingDiagnostics(): Promise<void> {
 		(message as { type?: string }).type ?? (message as { trigger?: string }).trigger,
 		workspaceErrors.map((e) => `${e.file}|${e.line}|${e.message}`),
 	]);
-	if (signature === lastPushSignature) { return; }
+	if (signature === lastPushSignature) { return true; }
 	lastPushSignature = signature;
 
 	pushToStandalone(message);
+	return true;
 }
 
 /** 每个文件的监视状态（只保留最近一个文件） */
@@ -269,15 +280,16 @@ function clipMessage(message: string, maxLen = 60): string {
 	return oneLine.length > maxLen ? oneLine.slice(0, maxLen - 1) + '…' : oneLine;
 }
 
-function scanActiveFile(): void {
+/** 扫当前文件；返回本拍是否决定说话（供 petTick 保证一拍只说一条） */
+function scanActiveFile(): boolean {
 	const { enabled, repeatSec } = fileScanConfig();
-	if (!enabled) { return; }
+	if (!enabled) { return false; }
 
 	const editor = vscode.window.activeTextEditor;
 	// 只盯真实磁盘文件（untitled/output/webview 面板跳过）
-	if (!editor || editor.document.uri.scheme !== 'file') { return; }
+	if (!editor || editor.document.uri.scheme !== 'file') { return false; }
 	const languageId = editor.document.languageId;
-	if (!supportedLanguageIds.has(languageId)) { return; }
+	if (!supportedLanguageIds.has(languageId)) { return false; }
 
 	const uri = editor.document.uri;
 	const errors = collectErrors([uri]);
@@ -300,7 +312,7 @@ function scanActiveFile(): void {
 		if (changed) {
 			fileScanState = { uri: uri.toString(), signature, count, lastPushAt: prev?.lastPushAt ?? now };
 		}
-		return;
+		return false;
 	}
 	fileScanState = { uri: uri.toString(), signature, count, lastPushAt: now };
 
@@ -322,6 +334,7 @@ function scanActiveFile(): void {
 	void (async () => {
 		if (await checkStandaloneAlive()) { pushToStandalone(message); }
 	})();
+	return true;
 }
 
 // ============================================================================
