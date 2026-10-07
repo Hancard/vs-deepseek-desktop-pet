@@ -100,8 +100,78 @@ for reason in ('remind', 'changed'):
     if not ok:
         fail += 1
 
+# ---------- 1.5 语料占位符全量回归（语料扩容后防回归） ----------
+# 规则：每条语料里出现的 {占位符} 必须落在"该场景实际会被传入的变量键"集合内，
+# 否则 pick_corpus 的 str.replace 缺键就会把占位符原样说进气泡（0.3.18/0.3.20 踩过）。
+import re  # noqa: E402
+import corpus  # noqa: E402
+
+CORPUS_LISTS = {
+    'syntax_error': (corpus.SYNTAX_ERROR, {'line', 'language'}),
+    'type_error': (corpus.TYPE_ERROR, {'line', 'language'}),
+    'import_error': (corpus.IMPORT_ERROR, {'line', 'language'}),
+    'name_error': (corpus.NAME_ERROR, {'line', 'language'}),
+    # many_errors 走两条路：diagnostics 只给 count/language，
+    # file_scan 给 file/count/language/line/lines —— 并集允许
+    'many_errors': (corpus.MANY_ERRORS, {'count', 'language', 'file', 'line', 'lines'}),
+    # 下面四个永远是 pick_corpus(category) 裸调 —— 一个占位符都不许有
+    'all_clear': (corpus.ALL_CLEAR, set()),
+    'greeting': (corpus.GREETING, set()),
+    'idle': (corpus.IDLE, set()),
+    'encourage': (corpus.ENCOURAGE, set()),
+    'file_scan': (corpus.FILE_SCAN, {'file', 'count', 'line', 'lines', 'language'}),
+    'file_remind': (corpus.FILE_REMIND, {'file', 'count', 'line', 'lines', 'language'}),
+    'file_clear': (corpus.FILE_CLEAR, {'file'}),
+}
+for cat, (lst, allowed) in CORPUS_LISTS.items():
+    for idx, line in enumerate(lst):
+        bad = set(re.findall(r'\{(\w+)\}', line)) - allowed
+        if bad:
+            out('[FAIL] corpus:%s[%d] 非法占位符 %s -> %r' % (cat, idx, sorted(bad), line[:36]))
+            fail += 1
+out('[PASS] corpus:placeholder-sweep (12 scenes / %d lines)'
+    % sum(len(v[0]) for v in CORPUS_LISTS.values()))
+
+# 动态抽样：generate_response 实际会用到的每一种 (场景, 变量) 组合，
+# 抽 120 次确认没有一条残留 '{'。以后往语料里加新句子，这条会自动兜住。
+from response_generator import pick_corpus  # noqa: E402
+
+FS_VARS = {'file': 'a.py', 'count': 3, 'language': 'python', 'line': '9', 'lines': '第9行'}
+DYNAMIC_COMBOS = [
+    ('syntax_error', {'language': 'python', 'line': '?'}),
+    ('type_error', {'language': 'python', 'line': '?'}),
+    ('import_error', {'language': 'python', 'line': '?'}),
+    ('name_error', {'language': 'python', 'line': '?'}),
+    ('many_errors', {'count': 7, 'language': 'python'}),
+    ('many_errors', dict(FS_VARS, count=7)),
+    ('file_scan', FS_VARS),
+    ('file_remind', FS_VARS),
+    ('file_clear', {'file': 'a.py'}),
+    ('greeting', {}), ('all_clear', {}), ('encourage', {}), ('idle', {}),
+]
+for cat, variables in DYNAMIC_COMBOS:
+    leaked = None
+    for _ in range(120):
+        t = pick_corpus(cat, dict(variables))
+        if '{' in t:
+            leaked = t
+            break
+    if leaked:
+        out('[FAIL] dynamic:%s 残留占位符 -> %r' % (cat, leaked[:40]))
+        fail += 1
+out('[PASS] dynamic:pick-corpus-sampling (%d combos x120)' % len(DYNAMIC_COMBOS))
+
 # ---------- 2. 端到端：起真服务器，/push 走完整链路 ----------
 import standalone  # noqa: E402
+
+# 点击台词的情绪词必须是 ui.html EMOTION_EXPRESSION 认识的五个，否则表情切不过去
+_VALID_EMOTIONS = {'idle', 'greeting', 'angry', 'happy', 'surprised'}
+for zone, pool in standalone.CLICK_LINES.items():
+    for text, emo in pool:
+        if emo not in _VALID_EMOTIONS:
+            out('[FAIL] click:%s 情绪词 %r 非法 -> %r' % (zone, emo, text[:24]))
+            fail += 1
+out('[PASS] click:emotion-words (%d zones)' % len(standalone.CLICK_LINES))
 
 PORT = 19893
 ready = threading.Event()
