@@ -1,5 +1,23 @@
 # Change Log
 
+## [0.3.21] — 2026-10-08
+
+> 语料扩容轮：12 个场景 + 3 个点击分区全部加量，并为语料库上一道
+> 占位符回归保险。
+
+### Added
+- **场景语料 +35 条**：syntax/type/import/name/many_errors/all_clear/
+  greeting/idle/encourage/file_scan/file_remind/file_clear 共 12 个场景
+  各加 3 条（多数场景），总数 57 → 92。新句全部只用该场景实际会传入的
+  占位符键（`{file}/{count}/{line}/{language}`），避免缺键残留
+- **点击台词 +9 条**：head/body/desk 三分区各 4 → 7 条，情绪词仍限定在
+  EMOTION_EXPRESSION 认识的五个（idle/greeting/angry/happy/surprised）
+- **占位符全量回归**（test_response_generator_hardening.py）：
+  * 静态扫描：12 个场景 92 条语料的占位符必须落在该场景的合法键集合内
+  * 动态抽样：13 种实际 (场景, 变量) 组合各抽 120 次确认无 `{` 残留
+  * 点击台词情绪词合法性校验
+  以后往语料里加新句子，这三道会自动兜住
+
 ## [0.3.20] — 2026-10-07
 
 > 审计轮：修 30 秒时钟的两处逻辑漏洞 + 名牌被角色卡遮挡。
