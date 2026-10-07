@@ -508,6 +508,12 @@
       display: flex; flex-direction: column; align-items: center;
       padding: 2px 12px 3px;
       margin-top: -6px;   /* 再往上拉，缩小与角色卡的间距 */
+      /* 必须定位 + 抬 z-index：角色卡是 position:fixed;z-index:0 的**不透明**
+         水族箱底板，按 CSS 绘制顺序会盖在所有静态元素之上。名牌是静态的，
+         上面那句负 margin 又把它压进了卡的范围 —— 不抬起来的话，名牌上沿
+         （边框 + 字号 13px 的顶部）会被卡直接吃掉，看成"名字被切了半截"。
+         1 已够（高于卡的 0），且低于气泡（与名牌区域本来就不重叠）。 */
+      position: relative; z-index: 1;
       border-radius: 10px;
       background: #161a2e;
       border: 1px solid rgba(255, 107, 157, 0.28);
