@@ -292,7 +292,12 @@ def generate_response(context: dict) -> dict:
         if error_count >= 5:
             text = pick_corpus("many_errors", {"count": error_count, "language": language})
         else:
-            variables = {"language": language}
+            # line 必须预置默认值：SYNTAX_ERROR 语料里有一条含 {line}，
+            # 而 pick_corpus 用 str.replace 替换，缺键就原样残留进气泡。
+            # 触发条件与 file_scan 分支同源：外部 /push 传 error_count>0
+            # 而 sample_errors 为空（此时 categorize_errors([]) 恒返回
+            # syntax_error），占位符就会说给用户听。
+            variables = {"language": language, "line": "?"}
             if errors:
                 variables["line"] = errors[0].get("line", "?")
             text = pick_corpus(category, variables)

@@ -75,6 +75,22 @@ out('[%s] unit:file_scan-empty-errors-no-placeholder text=%r' % (
 if not ok:
     fail += 1
 
+# diagnostics 且 sample_errors 为空：categorize_errors([]) 恒返回 syntax_error，
+# 而 SYNTAX_ERROR 语料里有一条含 {line} —— variables 缺 line 键时占位符会原样
+# 说进气泡（与 file_scan 分支同源，上一轮只补了 file_scan 那半）。
+# pick_corpus 是随机抽，单次抽不中，必须多抽几次才能把这条语句逼出来。
+leak = None
+for _ in range(80):
+    r = generate_response({'trigger': 'diagnostics', 'error_count': 2, 'sample_errors': []})
+    if '{' in r['payload']['text']:
+        leak = r['payload']['text']
+        break
+ok = leak is None
+out('[%s] unit:diagnostics-empty-errors-no-placeholder%s' % (
+    'PASS' if ok else 'FAIL', '' if ok else ' text=%r' % leak[:36]))
+if not ok:
+    fail += 1
+
 # remind 与 changed 在 many_errors 之外的语料分支要能区分（都不许抛、不许留占位符）
 for reason in ('remind', 'changed'):
     r = generate_response({'trigger': 'file_scan', 'file': 'b.py',
