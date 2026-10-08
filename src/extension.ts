@@ -110,7 +110,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const statusTimer = setInterval(() => { void refreshPetStatus(); }, STATUS_POLL_INTERVAL_MS);
 	context.subscriptions.push(new vscode.Disposable(() => clearInterval(statusTimer)));
 
-	vscode.window.showInformationMessage('Airi Monitor 已就绪 — 诊断消息将转发到桌宠', '启动桌宠').then((selection) => {
+	vscode.window.showInformationMessage('deepseek Monitor 已就绪 — 诊断消息将转发到桌宠', '启动桌宠').then((selection) => {
 		if (selection === '启动桌宠') { void vscode.commands.executeCommand('vscode-anime-assistent.launchPet'); }
 	});
 	console.log(`[airi-monitor] Ready. Push target: http://127.0.0.1:${STANDALONE_PORT}/push`);
@@ -388,11 +388,11 @@ async function refreshPetStatus(): Promise<void> {
 	lastHealthCheckAt = 0; // 强制重新探测，否则轮询永远命中 15s 缓存
 	const alive = await checkStandaloneAlive();
 	petStatusBar.text = alive
-		? '$(heart) Airi 桌宠: 运行中'
-		: '$(rocket) Airi 桌宠: 未运行';
+		? '$(heart) deepseek 桌宠: 运行中'
+		: '$(rocket) deepseek 桌宠: 未运行';
 	petStatusBar.tooltip = alive
-		? `Airi 桌宠服务器运行中 (port ${STANDALONE_PORT})，点击可查看启动状态`
-		: `点击启动 Airi 桌宠 (desktop_pet/standalone.py, port ${STANDALONE_PORT})`;
+		? `deepseek 桌宠服务器运行中 (port ${STANDALONE_PORT})，点击可查看启动状态`
+		: `点击启动 deepseek 桌宠 (desktop_pet/standalone.py, port ${STANDALONE_PORT})`;
 }
 
 // ============================================================================
@@ -414,7 +414,7 @@ function findPythonPath(): string {
 
 async function launchStandalonePet(): Promise<void> {
 	if (await checkStandaloneAlive()) {
-		vscode.window.showInformationMessage('Airi 桌宠已经在运行了');
+		vscode.window.showInformationMessage('deepseek 桌宠已经在运行了');
 		return;
 	}
 
@@ -449,7 +449,7 @@ async function launchStandalonePet(): Promise<void> {
 		lastHealthCheckAt = 0; // 强制重新探测
 		if (await checkStandaloneAlive()) {
 			lastHealthCheckAt = Date.now();
-			vscode.window.showInformationMessage('Airi 桌宠已启动，开始监视你的代码 (￣▽￣)');
+			vscode.window.showInformationMessage('deepseek 桌宠已启动，开始监视你的代码 (￣▽￣)');
 			void refreshPetStatus();
 			// 以桌宠被唤醒为起点重新计 30s：唤醒后先安静一个周期，
 			// 之后每 30s 才主动响应一次
@@ -495,7 +495,7 @@ function createOrShowAssistantPanel(context: vscode.ExtensionContext): void {
 	if (panel) { panel.reveal(vscode.ViewColumn.Beside); return; }
 
 	panel = vscode.window.createWebviewPanel(
-		'airiAssistant', 'Airi Assistant', vscode.ViewColumn.Beside,
+		'airiAssistant', 'deepseek Assistant', vscode.ViewColumn.Beside,
 		{ enableScripts: true, retainContextWhenHidden: true }
 	);
 	panel.webview.html = getWebviewHtml();
@@ -522,7 +522,7 @@ h2{color:var(--accent);margin-bottom:8px;font-size:14px}
 .error-item .meta{color:var(--muted);font-size:10px}
 .empty{color:var(--muted);font-size:12px;text-align:center;padding:20px}
 </style></head><body>
-<h2>Airi Monitor</h2>
+<h2>deepseek Monitor</h2>
 <p class="status">诊断消息自动转发至桌宠 (port 19876)</p>
 <div id="list"><p class="empty">没有错误 — 一切正常</p></div>
 <script>

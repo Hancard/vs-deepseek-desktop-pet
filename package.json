@@ -1,8 +1,8 @@
 {
   "name": "vscode-anime-assistent",
   "displayName": "airi-monitor",
-  "description": "Anime desktop pet for VS Code — tsundere Airi watches your code and roasts your bugs",
-  "version": "0.3.22",
+  "description": "Anime desktop pet for VS Code — tsundere deepseek watches your code and roasts your bugs",
+  "version": "0.3.23",
   "publisher": "123457890wasd-cmyk",
   "repository": {
     "type": "git",
@@ -26,11 +26,11 @@
       },
       {
         "command": "vscode-anime-assistent.launchPet",
-        "title": "Launch Airi Desktop Pet"
+        "title": "Launch deepseek Desktop Pet"
       }
     ],
     "configuration": {
-      "title": "Airi Monitor",
+      "title": "deepseek Monitor",
       "properties": {
         "airiMonitor.fileScan.enabled": {
           "type": "boolean",
