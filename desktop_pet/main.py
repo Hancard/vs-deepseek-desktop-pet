@@ -68,7 +68,7 @@ def main():
     api.set_input_logger(lambda m: print(f'[airi-input] {m}', flush=True))
 
     window = webview.create_window(
-        title='Airi',
+        title='deepseek',
         url=page_url,
         width=win_w,
         height=win_h,

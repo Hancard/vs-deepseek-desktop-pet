@@ -1,5 +1,5 @@
 """
-standalone.py — Airi 桌面宠物独立启动器
+standalone.py — deepseek 桌面宠物独立启动器
 
 一键启动：python standalone.py
 不依赖 VS Code 扩展，内置 SSE 服务器 + pywebview 窗口。
@@ -66,7 +66,7 @@ def log(msg=''):
 def _init_log():
     try:
         with open(LOG_PATH, 'w', encoding='utf-8') as fh:
-            fh.write('Airi 桌宠启动日志 —— 每次启动重写\n')
+            fh.write('deepseek 桌宠启动日志 —— 每次启动重写\n')
             fh.write(f'python  : {sys.executable}\n')
             fh.write(f'cwd     : {os.getcwd()}\n')
             fh.write(f'script  : {os.path.abspath(__file__)}\n')
@@ -532,7 +532,7 @@ def main():
     # 点击/拖拽同样必须留痕：用户报"点了没反应"时，日志里至少要能看出
     # 是前端没命中（没有 pet_click）还是桥/后端断了。
     api.set_input_logger(lambda m: log(f'[airi-input] {m}'))
-    window = webview.create_window(title='Airi', url=page_url, width=win_w, height=win_h, x=x, y=y, frameless=True, transparent=True, on_top=True, resizable=False, easy_drag=False, js_api=api)
+    window = webview.create_window(title='deepseek', url=page_url, width=win_w, height=win_h, x=x, y=y, frameless=True, transparent=True, on_top=True, resizable=False, easy_drag=False, js_api=api)
     api.set_window(window)
     if _backend_available:
         from response_generator import pick_corpus
