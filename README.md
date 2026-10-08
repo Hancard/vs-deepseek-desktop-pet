@@ -45,7 +45,7 @@
 │  • POST /push 转发到桌宠服务器 (19876)     │
 │  • checkStandaloneAlive() 健康探测(15s缓存)│
 │  • Webview Panel (VS Code 内备用显示)      │
-│  • Launch Airi Desktop Pet 一键启动命令    │
+│  • Launch deepseek Desktop Pet 一键启动命令│
 └──────────────┬─────────────┬───────────────┘
                │             ▲ POST /push
                ▼             │ (watcher.py 独立监听文件保存)
@@ -109,8 +109,8 @@ npm run compile
 
 ```powershell
 # 方式一：状态栏按钮（推荐）
-# 打开项目 → 按 F5 起扩展开发宿主 → 右下角状态栏点「Airi」按钮
-# （等价于命令面板 Ctrl+Shift+P → "Launch Airi Desktop Pet"）
+# 打开项目 → 按 F5 起扩展开发宿主 → 右下角状态栏点「deepseek」按钮
+# （等价于命令面板 Ctrl+Shift+P → "Launch deepseek Desktop Pet"）
 # 扩展会自动查找 Python 并启动桌宠，8 秒内确认启动成功
 
 # 方式二：一键启动脚本（桌宠 + 文件监听器）
@@ -173,7 +173,7 @@ vscode-anime-assistent/
 │   └── find_webview.py           # 定位各解释器的 pywebview 路径/版本，列透明相关源码行
 │
 ├── python_backend/               # 回复生成（傲娇大脑）
-│   ├── character.py              # Airi 角色人格 + System Prompt
+│   ├── character.py              # deepseek 角色人格 + System Prompt
 │   ├── corpus.py                 # 场景语料库 + 情绪映射 (EMOTION_MAP)
 │   ├── response_generator.py     # 错误分类 + 语料库/DeepSeek API 双通道
 │   ├── main.py                   # [旧版] stdin/stdout 后端，当前链路未使用
@@ -247,7 +247,7 @@ data: {"type":"errorAlert","payload":{"text":"笨蛋！括号都配不对！","e
   与拖拽共用同一个 `mousedown`，**移动超过 5 px 就只算拖拽、不算点击**
 - 😤 **情绪表情系统**：每条回复带情绪，角色表情自动切换，8 秒后回落 idle
 - 🐋 **Live2D 角色**：默认用 DS鲸鱼娘 Live2D 模型渲染（可呼吸、会眨眼），失败自动退回立绘
-- 🖱️ **右键菜单**：退出 Airi（销毁窗口并结束进程，重开用启动命令/脚本）
+- 🖱️ **右键菜单**：退出 deepseek（销毁窗口并结束进程，重开用启动命令/脚本）
 - 🔄 **自动重连**：SSE 断线后自动恢复连接
 
 ### Live2D 角色（默认渲染方式）
@@ -375,7 +375,7 @@ ui.html                                     common.py
 
 | 命令 | 说明 |
 |------|------|
-| `Launch Airi Desktop Pet` | 一键启动桌宠（自动查找 Python，启动后确认服务器在线） |
+| `Launch deepseek Desktop Pet` | 一键启动桌宠（自动查找 Python，启动后确认服务器在线） |
 | `Open Anime Assistant` | 打开 VS Code 内置助手面板（备用显示，按需打开） |
 
 ---
@@ -386,12 +386,12 @@ ui.html                                     common.py
 
 1. 确认已安装 pywebview：`pip show pywebview`（注意用你启动时的那个 Python）
 2. 确认 Python ≥ 3.9：`python --version`
-3. 用命令面板 `Launch Airi Desktop Pet` 启动，失败会有具体错误提示
+3. 用命令面板 `Launch deepseek Desktop Pet` 启动，失败会有具体错误提示
 4. 手动运行 `python desktop_pet/standalone.py` 看控制台报错
 
-### Q: 右键退出了 Airi，怎么再打开？
+### Q: 右键退出了 deepseek，怎么再打开？
 
-重新执行 `Launch Airi Desktop Pet` 命令，或运行 `start.bat` /
+重新执行 `Launch deepseek Desktop Pet` 命令，或运行 `start.bat` /
 `python desktop_pet/standalone.py`。（v0.2.4 起右键菜单是「退出」而非「隐藏」，
 旧版本隐藏后无法找回，只能结束 python 进程。）
 
