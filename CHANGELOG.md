@@ -1,5 +1,27 @@
 # Change Log
 
+## [0.3.23] — 2026-10-09
+
+> 品牌改名收尾：人设与全部用户可见文案 Airi → deepseek。
+
+### Changed
+- **人设（character.py）**：`CHARACTER_NAME` → "deepseek"，SYSTEM_PROMPT
+  里 AI 自称改为 deepseek（走 DeepSeek API 生成台词时不再自称 Airi）；
+  启动 statusChange 随之变为 "deepseek 已就绪"
+- **扩展 UI（extension.ts / package.json）**：状态栏 "Airi 桌宠: 运行中/
+  未运行"、就绪通知、Webview 面板标题 "Airi Assistant / Airi Monitor"、
+  命令面板 "Launch deepseek Desktop Pet"、设置节标题 "deepseek Monitor"、
+  扩展描述——全部改为 deepseek
+- **桌宠本体（standalone.py / main.py / launch*.bat）**：窗口标题
+  `title='Airi'` → `'deepseek'`、启动日志头、bat 的 echo/控制台窗口名
+- **README**：面向用户的操作说明同步（命令名、状态栏按钮、右键退出、
+  目录注释）；版本历史与旧测量数据保持原样
+
+### 不改的部分（有意保留）
+- 内部标识符：命令/配置 ID `airiMonitor.*`、viewId `airiAssistant`、
+  日志前缀 `[airi-*]`、`AiriHandler`、`AiriAsset/1.0`、`AIRI_PYTHON_PATH`
+  —— 改 ID 会使已保存的设置与键绑定失效，前缀只出现在日志里
+
 ## [0.3.22] — 2026-10-08
 
 ### Changed
