@@ -653,7 +653,7 @@
 
   <!-- 右键菜单 -->
   <div class="context-menu" id="contextMenu">
-    <div class="menu-item" data-action="exit">退出 Airi</div>
+    <div class="menu-item" data-action="exit">退出 deepseek</div>
   </div>
 
   <script>
@@ -1068,7 +1068,7 @@
           switch (msg.type) {
             case 'chatMessage': showBubble(msg.payload.text || '', false); setEmotion(emotion); break;
             case 'errorAlert': showBubble(msg.payload.text || '', true); setEmotion(emotion || 'angry'); break;
-            case 'backendExit': setOnline(false); showBubble('Airi 已离线…', true); break;
+            case 'backendExit': setOnline(false); showBubble('deepseek 已离线…', true); break;
             case 'pythonMessage': if (msg.payload && msg.payload.message) { showBubble(msg.payload.message, false); setEmotion(emotion); } break;
           }
         } catch (e) {}
