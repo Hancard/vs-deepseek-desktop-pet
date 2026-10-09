@@ -1,5 +1,26 @@
 # Change Log
 
+## [0.3.24] — 2026-10-10
+
+> 审计修正：0.3.23 改名波及面的两处漏网（用户可见 "Airi" 残留）。
+
+### Fixed
+
+- **右键菜单与离线气泡**（`desktop_pet/ui.html`）：「退出 Airi」→
+  「退出 deepseek」；后端退出时的气泡「Airi 已离线…」→「deepseek 已离线…」。
+  这两处是用户在桌宠上直接看得到的文案，上一轮改名时漏掉了。
+- **根目录 `start.bat`**：echo 文案 ×3 与控制台窗口名 `start "Airi Pet" …`
+  → deepseek。0.3.23 只改了 `desktop_pet/launch*.bat`，根目录一键启动脚本
+  被遗漏。改后过 `check_launchers.py` 纯 ASCII 校验。
+- **`--help` 描述**：`desktop_pet/main.py`（'deepseek Desktop Pet'）与
+  `desktop_pet/watcher.py`（'deepseek file watcher'）的 argparse description。
+
+### Notes
+
+- 其余 "Airi" 命中均为代码注释 / 文档 / 版本历史 / 内部标识符
+  （`airiMonitor.*`、`AiriHandler`、`AiriAsset/1.0`、`AIRI_PYTHON_PATH` 等），
+  按既有约定有意保留——改内部 ID 会破坏已存设置与键绑定。
+
 ## [0.3.23] — 2026-10-09
 
 > 品牌改名收尾：人设与全部用户可见文案 Airi → deepseek。
