@@ -22,7 +22,7 @@ import live2d_assets
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Airi Desktop Pet')
+    parser = argparse.ArgumentParser(description='deepseek Desktop Pet')
     parser.add_argument('--port', type=int, required=True,
                         help='VS Code extension HTTP server port')
     args = parser.parse_args()

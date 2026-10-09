@@ -342,7 +342,7 @@ def watch_single_file(filepath: str, port: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Airi file watcher')
+    parser = argparse.ArgumentParser(description='deepseek file watcher')
     parser.add_argument('--dir', default='.',
                         help='Directory to watch (default: current directory)')
     parser.add_argument('--file', default='',
