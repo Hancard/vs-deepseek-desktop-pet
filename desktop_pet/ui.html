@@ -1455,7 +1455,15 @@
       try {
         var canvas = (live2d.app && live2d.app.canvas) || null;
         var box = canvas ? canvas.getBoundingClientRect() : null;
-        fetch('/event', {
+        // 必须用绝对地址 EVENT_URL（主服务器端口）。这里曾经写的是相对路径
+        // '/event' —— 而页面是从**资产服务器**（start_asset_server 的动态端口）
+        // 加载的，相对路径会打到资产服务器上，它只认 /、/vendor/、/pet-assets/，
+        // 其余一律 404（见 common.py 的 _AssetHandler.do_GET）。
+        // 后果：轮廓诊断从来没有一条进过 .airi-pet.log（实测 sil=0 / js=2），
+        // 而且 silDiagSent 配额照常烧掉 —— 后面真正失败时也不再上报，
+        // 这条"为什么没透明"的黑匣子整体失明。同文件的 reportJS 用的是
+        // EVENT_URL，所以只有它一直好使。
+        fetch(EVENT_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
