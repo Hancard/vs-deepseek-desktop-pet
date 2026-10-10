@@ -120,6 +120,36 @@ if not any('"a": 1' in t for t in texts):
     out('[FAIL] text=dict was not serialized')
     fail += 1
 
+# ---------- 2.5 payload 本身不是 dict：null / 数字 / 布尔 / 含 'text' 的列表 ----------
+# 0.3.25：body 层的加固没管到 payload 层。`'text' in msg.get('payload', {})`
+#   * None/int/bool  -> TypeError（不可迭代）
+#   * ['text']       -> 返回 True，紧接着 msg['payload']['text'] -> TypeError
+# 两条都是未捕获异常 → 500 断连（实测复现）。这里放在队列内容断言之后，
+# 免得新推的垃圾把上面 last_n(14) 的窗口挤出。
+payload_cases = [
+    ('payload-null', {'type': 'chatMessage', 'payload': None}),
+    ('payload-int', {'type': 'chatMessage', 'payload': 123}),
+    ('payload-bool', {'type': 'chatMessage', 'payload': True}),
+    ('payload-list-text', {'type': 'chatMessage', 'payload': ['text']}),
+    ('diag-payload-null', {'type': 'diagnostics', 'payload': None}),
+    ('diag-payload-int', {'type': 'diagnostics', 'payload': 7}),
+]
+for name, payload in payload_cases:
+    st, resp = post('/push', payload)
+    ok = (st == 200 and resp == {'status': 'pushed'})
+    out('[%s] %s status=%r resp=%r' % ('PASS' if ok else 'FAIL', name, st, resp))
+    if not ok:
+        fail += 1
+
+# ---------- 2.6 /event 的 body 非 UTF-8 ----------
+# decode 原先没带 errors=（且在 try 之外）：非 UTF-8 body 抛
+# UnicodeDecodeError → 连 'parse failed' 都写不进日志，请求直接断连。
+st, resp = post('/event', b'\xff\xfe\xfd not utf8 \xc3\x28')
+ok = (st == 200 and resp == {'status': 'ok'})
+out('[%s] event-binary-body status=%r resp=%r' % ('PASS' if ok else 'FAIL', st, resp))
+if not ok:
+    fail += 1
+
 # ---------- 3. 正常路径不受影响 ----------
 st, resp = post('/push', {'type': 'chatMessage',
                           'payload': {'text': '正常消息', 'emotion': 'happy'}})

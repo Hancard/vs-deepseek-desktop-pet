@@ -318,19 +318,23 @@ class AiriHandler(BaseHTTPRequestHandler):
                 push_message('chatMessage', body[:500], 'idle')
                 self._json_response({'status': 'pushed'})
                 return
-            if 'payload' in msg and 'text' in msg.get('payload', {}):
+            # payload 不可信：null / 数字 / 布尔 / 列表都会让
+            # 'text' in payload 抛 TypeError（None 与 int 不可迭代），
+            # 而这一句此前在 try 之外 —— 直接 500 断连（实测
+            # payload=null / 123 / ["text"] 三种都断）。必须先确认是 dict。
+            p = msg.get('payload')
+            if isinstance(p, dict) and 'text' in p:
                 t = msg.get('type', 'chatMessage')
-                tx = msg['payload']['text']
+                tx = p['text']
                 # 外部 POST 的内容不可信：text 传数字/对象时，前端 typeText 的
                 # charAt 会直接抛 TypeError（气泡空白 + jsError 黑匣子报警）。
                 # 非字符串一律序列化成可读文本，绝不让畸形 payload 炸穿链路。
                 if not isinstance(tx, str):
                     tx = json.dumps(tx, ensure_ascii=False) if (
                         isinstance(tx, (dict, list))) else str(tx)
-                em = msg['payload'].get('emotion', 'idle')
+                em = p.get('emotion', 'idle')
                 push_message(t, tx, em)
-            elif msg.get('type') == 'diagnostics' and 'payload' in msg:
-                p = msg['payload']
+            elif msg.get('type') == 'diagnostics' and isinstance(p, dict):
                 # items 传 null 会在这里炸出 None[:5] TypeError → 500 断连；
                 # count 传字符串会让 _builtin_reply 的 > 0 比较抛 TypeError。
                 # 诊断来源不止自家扩展一个，字段类型必须兜底。
@@ -375,7 +379,10 @@ class AiriHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 return
-            body = self.rfile.read(length).decode('utf-8')
+            # decode 必须带 errors='replace'（与 /push 一致）：非 UTF-8 的 body
+            # 会让 decode 抛 UnicodeDecodeError，而它原先在 try 之外 ——
+            # 请求直接断连，日志里连一条 /event parse failed 都留不下。
+            body = self.rfile.read(length).decode('utf-8', errors='replace')
             try:
                 msg = json.loads(body)
                 kind = msg.get('type')
