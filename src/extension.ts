@@ -332,7 +332,15 @@ function scanActiveFile(): boolean {
 	};
 
 	void (async () => {
-		if (await checkStandaloneAlive()) { pushToStandalone(message); }
+		if (await checkStandaloneAlive()) { pushToStandalone(message); return; }
+		// 桌宠不可达：这一条没送出去，把**整条决策状态回滚**（含 signature），
+		// 让下一拍从头再判一次。只把 lastPushAt 提前到 now 的旧写法会让状态
+		// 显示"已经报过"——bug 首播被静默吞掉，用户要么等满一个 repeatSec
+		// 冷却、要么永远收不到"干净了"（count=0 走不到 remind 分支）。
+		// 与 pushPendingDiagnostics 的"脏标记不可吞"同源。
+		// prev 是本次改动前的状态对象（新文件时为 undefined）——回滚它即可，
+		// 因为 fileScanState 在上面已经被换成了新对象，不会自我覆盖。
+		fileScanState = prev;
 	})();
 	return true;
 }
