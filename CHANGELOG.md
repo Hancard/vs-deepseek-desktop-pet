@@ -1,5 +1,42 @@
 # Change Log
 
+## [0.3.25] — 2026-10-10
+
+> 例行审计：三个可复现的断连/失明 bug + 一处状态吞标记。
+
+### Fixed
+
+- **轮廓诊断通道整体失明**（`desktop_pet/ui.html` `reportSil`）：
+  上报用的是相对路径 `fetch('/event')`，而页面是从**资产服务器**（动态端口）
+  加载的 —— 相对路径打到资产服务器上，它只认 `/`、`/vendor/`、`/pet-assets/`，
+  其余一律 404（`common.py` 的 `_AssetHandler.do_GET`）。
+  后果：日志里 `[airi-sil]` **一条都没有**（实测 sil=0 / js=2），而且
+  `silDiagSent` 的 12 条配额照常被烧掉 —— 后续真故障也不再上报。
+  同文件的 `reportJS` 用的是绝对地址 `EVENT_URL`，所以它一直好使。
+  改用 `EVENT_URL`。
+- **`/push` 的 payload 不是 dict 时断连**（`desktop_pet/standalone.py`）：
+  `'text' in msg.get('payload', {})` 在 payload 为 `null` / 数字 / 布尔时抛
+  TypeError（不可迭代）；payload 为 `["text"]` 时**返回 True**，紧接着
+  `msg['payload']['text']` 又抛 TypeError。两条路都是未捕获异常 → 500 断连。
+  0.3.19 只加固了 body 层（body 为数组/标量/null），payload 层漏了。
+  改为先 `isinstance(p, dict)` 判定。
+- **`/event` 的 body 非 UTF-8 时断连**（`desktop_pet/standalone.py`）：
+  `decode('utf-8')` 没带 `errors=`，且位置在 `try` 之外 —— 非 UTF-8 body
+  抛 UnicodeDecodeError，连 `[airi-standalone] /event parse failed` 都写不进
+  日志，请求直接断掉。与 `/push` 用同一条防线：`errors='replace'`。
+- **当前文件扫描在桌宠不可达时吞掉播报**（`src/extension.ts` `scanActiveFile`）：
+  推送是异步的（先 `checkStandaloneAlive()` 再 POST），但 `fileScanState`
+  在推之前就已经推进到新状态 —— 桌宠没起来时这条播报被静默丢弃，之后
+  要么等满一个 `repeatIntervalSec` 冷却、要么永远收不到（`count=0` 的
+  "干净了"走不到 remind 分支）。与 0.3.20 修的"诊断脏标记不可吞"同源：
+  检测到没送出去时**回滚整条决策状态**（含 signature），下一拍重判。
+
+### Tests
+
+- `test_push_hardening.py` 16 → 24 用例：新增 payload 级畸形 6 条
+  （null / 数字 / 布尔 / `["text"]` / diagnostics 的 null 与数字）+ 
+  `/event` 非 UTF-8 body 1 条。修复前这 7 条全部断连（已复现）。
+
 ## [0.3.24] — 2026-10-10
 
 > 审计修正：0.3.23 改名波及面的两处漏网（用户可见 "Airi" 残留）。
