@@ -1,6 +1,7 @@
 """test_window_clamp.py — clamp_to_virtual_screen 边界用例测试（离线可跑）。
 
-用法: python test_window_clamp.py  （结果写 live2d_probe/_clamp_test.txt）
+用法: python test_window_clamp.py  （结果写 desktop_pet/_clamp_test.txt —— 
+      注意是 desktop_pet/ 不是本目录，ROOT 指向被 import 的 common.py 所在处）
 覆盖: 屏内不动 / 四边出界 / 角落极限 / 双屏负坐标虚拟桌面 / 真机度量。
 """
 import io

@@ -46,7 +46,10 @@ bridge_probe_*.txt
 shot_pixels_*.txt
 
 # 我自己的临时/中间文件（下划线开头）
-_*.txt
+# 0.3.26 起从 `_*.txt` 放宽到 `_*`：check_ui_js.py / jscheck.py 会写出
+# _ui_js.js、_jscheck_out.txt，临时验证脚本也叫 _tmp_*.py —— 只忽略 .txt
+# 会让这些产物天天挂在 git status 里，最后总有一次被顺手 commit 进去。
+_*
 
 # 用户机器上跑出来的原始日志备份（含本机路径与 pid）
 log_user_run_*.txt

@@ -35,3 +35,8 @@ desktop_pet/assets/live2d/vendor/live2dcubismcore.min.js
 # 桌宠启动诊断日志（每次启动重写）——扩展用 stdio:'ignore' 起桌宠，
 # 这是唯一能看到 Live2D 为何降级的途径，见 standalone.py:log()
 desktop_pet/.airi-pet.log
+
+# live2d_probe 工具跑出来的本地产物（都可重跑重建，不进库）
+# _probe_*.html 由 gen_ui_probe.py 生成，check_ui_js.py 缺文件时也会自动生成
+desktop_pet/_probe_*.html
+desktop_pet/_clamp_test.txt
