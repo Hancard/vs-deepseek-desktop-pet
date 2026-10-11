@@ -1353,6 +1353,8 @@
           gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
           gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
         } catch (err) { return null; }
+        // readPixels 的行序本来就是**自底向上**（第 0 行 = 画布最下边），
+        // 与下游约定一致，不用动。
         return { buf: buf, w: w, h: h };
       }
 
@@ -1364,8 +1366,29 @@
         g2.clearRect(0, 0, w, h);
         g2.drawImage(canvas, 0, 0, w, h);
         var img = g2.getImageData(0, 0, w, h);
-        return { buf: img.data, w: w, h: h };
+        // ⚠️ getImageData 的行序与 readPixels **相反**：第 0 行是图片最上边。
+        // 下游 scanAlpha() / alphaAt() 只认一种约定 ——「行 0 = 底边」
+        // （alphaAt 的注释写着"WebGL 的 y 轴朝上，DOM 的朝下，这里要翻"）。
+        // 这两条读取路径以前把行序当成一样的，于是**只有在 '2d' 回退路径上**
+        // 轮廓矩形和点击命中会整体上下镜像：region 把倒过来的轮廓设成窗口形状，
+        // 点头顶命中桌面、点空白处反而命中角色。
+        // 'gl' 不可信时才会走到这里（WebView2 windowed hosting 下正是如此），
+        // 所以这台机器从没暴露过 —— 但回退路径存在的意义就是那时候要能用。
+        return { buf: rowsBottomUp(img.data, w, h), w: w, h: h };
       } catch (err) { return null; }
+    }
+
+    // 把"自顶向下"的像素行序翻成"自底向上"，与 readPixels 对齐。
+    // 抽成独立函数是为了能被 node 单独加载做单元回归
+    // （见 live2d_probe/test_alpha_orientation.py）—— 这段逻辑错一次，
+    // 表现是"轮廓和点击上下颠倒"，在真实环境里极难判断方向。
+    function rowsBottomUp(data, w, h) {
+      var out = new Uint8ClampedArray(data.length);
+      var stride = w * 4;
+      for (var y = 0; y < h; y++) {
+        out.set(data.subarray(y * stride, y * stride + stride), (h - 1 - y) * stride);
+      }
+      return out;
     }
 
     function mergeRuns(rows) {
