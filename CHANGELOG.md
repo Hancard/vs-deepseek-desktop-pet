@@ -1,5 +1,73 @@
 # Change Log
 
+## [0.3.26] — 2026-10-11
+
+> 例行审计：一个真 bug（`'2d'` 回退路径的轮廓/点击上下镜像）+ 一处改名漏网
+> + 两个诊断工具自己坏掉。**alpha 行序这条只有代码级证据、没能实机复现**，
+> 原因见下（不是没查，是这台机器的运行路径根本走不到）。
+
+### Fixed
+
+- **`'2d'` alpha 回退路径整体上下镜像**（`desktop_pet/ui.html` `readAlphaGrid`）：
+  `getImageData` 的行 0 是图片**最上边**，`readPixels` 的行 0 是画布**最下边**；
+  下游 `scanAlpha()` / `alphaAt()` 只认一种约定（行 0 = 底边 —— `alphaAt` 自己的
+  注释就写着"WebGL 的 y 轴朝上，DOM 的朝下，这里要翻"），可这两条读取路径被
+  当成行序相同。后果（只在 `'2d'` 回退路径上，即 gl 读数不可信时）：
+  `characterRects().rects` 整体镜像 → `pushSilhouette` 把倒过来的轮廓交给
+  `SetWindowRgn`，窗口形状上下颠倒；`alphaAt()` 的 `gy` 同样镜像 → 点头顶命中
+  桌面、点空白处反而命中角色。
+  新增 `rowsBottomUp(data, w, h)` 把行序归一，`'2d'` 分支统一走它；`'gl'` 分支
+  显式注明**不需要**翻。
+  **为什么一直没暴露**：这台机器走旧绘图路径，`character.png` 是不透明 PNG
+  → coverage≈1.0 → `silAlphaMode='off'` → `pushSilhouette` 直接 return，
+  镜像不产生可见症状；而无头浏览器在本工具沙箱里起不来（chrome/msedge 的
+  `--headless=new`/`=old`/`Start-Process` 四种全 0 字节），所以**这条只有代码级
+  证据链，没有实机复现**。回退路径存在的意义就是 gl 读数不可信的那一天，
+  那时它是唯一的轮廓/命中的来源。
+- **扩展显示名仍是 `airi-monitor`**（`package.json`）：0.3.23 的改名清单改了
+  `contributes.configuration.title`、命令标题、`description`，漏了
+  `displayName` —— 而它就是 VS Code 扩展列表里显示的那个名字。
+  内部标识符（`airiMonitor.*`、viewId `airiAssistant`、`[airi-*]` 日志前缀）
+  仍有意保留，改 ID 会破坏已存设置与键绑定。
+- **`live2d_probe/jscheck.py` 的 node 路径写死**：硬编码
+  `...\node\versions\22.22.2-3\node.exe`，托管 node 换代到 `22.22.2-6` 之后
+  该文件不存在 → `subprocess` `FileNotFoundError` → rc=1，而且是**静默**
+  失效。而这个工具正是"页面什么都不显示"时的第一诊断手段 —— 它坏了，
+  排查入口就焊死了。抽出 `live2d_probe/node_finder.py`（扫 `versions/*`
+  目录倒序 + 系统 node + `shutil.which('node')`），两个工具共用。
+- **`live2d_probe/check_ui_js.py` 探针缺失即崩**：上来就
+  `io.open(desktop_pet/_probe_a.html)`，而该文件是 `gen_ui_probe.py` 的产物、
+  被 gitignore —— 新克隆的仓库里必然不存在，于是这个工具对任何人都是
+  rc=1（`FileNotFoundError`）。改为缺失时自动调 `gen_ui_probe.py` 生成，
+  仍失败给出明确指引；顺带补占位符残留检查（那种情况下 `--check` 的报错
+  是假阳性，不是真语法错）。
+- `test_window_clamp.py` 的 docstring 说结果写 `live2d_probe/`，实际 `ROOT`
+  指向 `desktop_pet/` —— 改成真实路径。
+
+### Tests
+
+- 新增 `test_alpha_orientation.py`：从**真实 ui.html** 正则抽出
+  `rowsBottomUp()` 源码交给 node 跑行为断言（行序是否真翻、长度是否守恒），
+  另加 4 条静态断言（`'2d'` 分支确实调了、两个消费方仍是"行 0 = 底边"、
+  `'gl'` 分支没被误改）。全绿，以后改这段逻辑会自动兜住方向性回归。
+- `live2d_probe/.gitignore` 的 `_*.txt` 放宽到 `_*`：`_ui_js.js`、
+  `_jscheck_out.txt`、临时验证脚本一直挂在 `git status` 里，早晚有一次被
+  顺手提交；根 `.gitignore` 补 `desktop_pet/_probe_*.html`、
+  `desktop_pet/_clamp_test.txt`。
+- `jscheck.py` rc=0；`check_ui_js.py` rc=0（3 段 script 全 OK，且走的是
+  "探针不存在 → 自动生成"那条新路径）。
+
+### 待验证（诚实记账）
+
+- **`[airi-sil]` 在日志里仍是 0 条** —— 0.3.25 修的 `reportSil` 相对路径
+  （改 `EVENT_URL`）装进 VSIX 后只跑过一次，还没在那个场景下重启验证过，
+  所以**不算修好，只算改完**。重启 VS Code 后应能在
+  `desktop_pet/.airi-pet.log` 里首次看到 `[airi-sil]`。
+- `.airi-pet.log` 里两条 `[airi-standalone] /event parse failed:
+  JSONDecodeError('Expecting value: line 1 column 1 (char 0)')`（10-10、10-11
+  各一条）**根因未定**：扩展侧发的是合法 JSON，`print()` 又不含 body，
+  无法从日志分辨是谁发的。本轮不改，先记账。
+
 ## [0.3.25] — 2026-10-10
 
 > 例行审计：三个可复现的断连/失明 bug + 一处状态吞标记。
