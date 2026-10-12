@@ -11,15 +11,25 @@
 """
 import io
 import json
+import os
 import sys
+import tempfile
 import urllib.request
 import threading
 import time
 
-sys.path.insert(0, r'S:\My event\projects\vscode-anime-assistent\desktop_pet')
-sys.path.insert(0, r'S:\My event\projects\vscode-anime-assistent\python_backend')
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(_HERE)
+sys.path.insert(0, os.path.join(_PROJ, 'desktop_pet'))
+sys.path.insert(0, os.path.join(_PROJ, 'python_backend'))
 
-OUT = r'S:\My event\projects\vscode-anime-assistent\live2d_probe\rg_hardening_result.txt'
+# ⚠️ 必须在 `import standalone` **之前**设置日志落点（v0.3.27）：见
+# test_push_hardening.py 顶部注释 —— 本测试的端到端段落也是进程内起
+# 生产服务器，请求会写进真实排障日志，必须隔离到 %TEMP%。
+os.environ['AIRI_PET_LOG'] = os.path.join(tempfile.gettempdir(),
+                                          'airi_test_rg_hardening.log')
+
+OUT = os.path.join(_HERE, 'rg_hardening_result.txt')
 _lines = []
 
 

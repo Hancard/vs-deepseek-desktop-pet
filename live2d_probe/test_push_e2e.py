@@ -8,12 +8,21 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
 
-ROOT = r"S:\My event\projects\vscode-anime-assistent\desktop_pet"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(_HERE)
+ROOT = os.path.join(_PROJ, 'desktop_pet')
 sys.path.insert(0, ROOT)
+
+# ⚠️ 必须在 `import standalone` **之前**设置日志落点（v0.3.27）：见
+# test_push_hardening.py 顶部注释 —— 本测试也是进程内起生产服务器。
+os.environ['AIRI_PET_LOG'] = os.path.join(tempfile.gettempdir(),
+                                          'airi_test_push_e2e.log')
+
 lines = []
 
 import standalone
@@ -78,6 +87,8 @@ if ok:
                  % (code, captured[-1] if captured else None, 'OK' if good else 'FAIL'))
 
 lines.append('OVERALL %s' % ('PASS' if ok else 'FAIL'))
-with io.open(os.path.join(ROOT, '_e2e_test.txt'), 'w', encoding='utf-8') as f:
+# 落点跟同目录其它测试一致（live2d_probe/）：ROOT 是 desktop_pet/，把测试产物
+# 写进去会污染产品目录（而且 live2d_probe/.gitignore 的 `_*` 规则罩不到它）。
+with io.open(os.path.join(_HERE, '_e2e_test.txt'), 'w', encoding='utf-8') as f:
     f.write('\n'.join(lines) + '\n')
 print('done')

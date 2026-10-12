@@ -47,7 +47,18 @@ except Exception as e:
 # desktop_pet/.airi-pet.log（已 gitignore）。
 #
 # 每次启动会截断重写，只保留本次的日志，不会无限增长。
-LOG_PATH = os.path.join(_script_dir, '.airi-pet.log')
+#
+# ⚠️ 落点可用 AIRI_PET_LOG 覆盖，**测试必须覆盖它**（v0.3.27）。
+# 原因：测试是 `import standalone` 之后直接 `start_server()` 起**进程内**服务器的，
+# 于是测试自己的请求也会走这里的 log()，写进开发者的这份排障日志里 ——
+# 而且没有任何标记能区分"这条是活的桌宠写的"还是"这条是我跑测试打进去的"。
+# 实锤：test_push_hardening.py 那条故意投毒的非 UTF-8 `/event` 用例，
+# 每跑一次就往真实日志追加一行
+#     [airi-standalone] /event parse failed: JSONDecodeError(...)
+# 上一轮（0.3.26）把它当成了"产品里一条来路不明的 parse 失败"记进 CHANGELOG
+# 悬而未决 —— 就是被这个假线索带偏的。测试请设 AIRI_PET_LOG 到 %TEMP%，
+# 见 live2d_probe/test_pet_log_isolation.py。
+LOG_PATH = os.environ.get('AIRI_PET_LOG') or os.path.join(_script_dir, '.airi-pet.log')
 
 
 def log(msg=''):

@@ -9,15 +9,29 @@
 """
 import io
 import json
+import os
 import sys
+import tempfile
 import urllib.request
 import threading
 import time
 
-sys.path.insert(0, r'S:\My event\projects\vscode-anime-assistent\desktop_pet')
-sys.path.insert(0, r'S:\My event\projects\vscode-anime-assistent\python_backend')
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(_HERE)
+sys.path.insert(0, os.path.join(_PROJ, 'desktop_pet'))
+sys.path.insert(0, os.path.join(_PROJ, 'python_backend'))
 
-OUT = r'S:\My event\projects\vscode-anime-assistent\live2d_probe\push_hardening_result.txt'
+# ⚠️ 必须在 `import standalone` **之前**设置日志落点（v0.3.27）。
+# standalone.LOG_PATH 是模块加载时算出来的；而本测试 import 之后直接调
+# start_server() 起的是**进程内**生产服务器，它的 /event 分支会走模块级 log()。
+# 不覆盖的话，下面那条故意投毒的非 UTF-8 用例，每跑一次就往开发者的
+#     desktop_pet/.airi-pet.log
+# 追加一行 "/event parse failed: JSONDecodeError(...)" —— 把测试噪声伪装成
+# "产品里一条来路不明的 parse 失败"（0.3.26 就是被这个假线索带偏的）。
+os.environ['AIRI_PET_LOG'] = os.path.join(tempfile.gettempdir(),
+                                          'airi_test_push_hardening.log')
+
+OUT = os.path.join(_HERE, 'push_hardening_result.txt')
 _lines = []
 
 

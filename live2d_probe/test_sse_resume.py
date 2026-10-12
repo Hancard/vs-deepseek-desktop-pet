@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 import threading
 import time
 from http.server import ThreadingHTTPServer
@@ -22,6 +23,13 @@ PROBE = os.path.dirname(os.path.abspath(__file__))
 PET_ROOT = os.path.join(os.path.dirname(PROBE), 'desktop_pet')
 sys.path.insert(0, PET_ROOT)
 sys.path.insert(0, PROBE)
+
+# ⚠️ 必须在 `import standalone` **之前**设置日志落点（v0.3.27）：见
+# test_push_hardening.py 顶部注释。本测试尤其要注意 —— 它 import 之后
+# 立刻自建 ThreadingHTTPServer(standalone.AiriHandler) 并 serve_forever()，
+# **没有 ready 等待**，所以不能靠"import 之后改 standalone.LOG_PATH"（有竞态）。
+os.environ['AIRI_PET_LOG'] = os.path.join(tempfile.gettempdir(),
+                                          'airi_test_sse_resume.log')
 
 import standalone  # noqa: E402
 
