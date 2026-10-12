@@ -26,6 +26,13 @@
  *   右键桌宠 →「检测周期」→ 1~60 秒（默认 30）。桌宠把值写进
  *   ~/.dsh/pets/airi-pet-settings.json，这里 fs.watchFile 监听它并立刻换周期。
  *   通道为什么是文件、以及为什么只有 Python 一个写入方，见 PET_SETTINGS_PATH。
+ *
+ * 【编辑语料怎么开】
+ *   右键桌宠 →「编辑语料」→ 桌宠把 openCorpusSeq 加一写进**同一个设置文件**，
+ *   这里看到序号变大就 openTextDocument 打开 ~/.dsh/pets/airi-pet-corpus.jsonc，
+ *   然后 POST /event {type:'corpusOpened'} 回执。桌宠在等这个回执决定要不要
+ *   走第二级回落（`code` 命令）—— 不回执会让它在 VS Code 已经打开的情况下
+ *   再拉起一个窗口。见 openCorpusIfRequested()。
  */
 
 import * as vscode from 'vscode';
@@ -107,7 +114,14 @@ export function activate(context: vscode.ExtensionContext) {
 	// 右键桌宠 →「检测周期」改的就是它：桌宠把值写进 PET_SETTINGS_PATH，
 	// 这里 watch 到变化立刻换周期（并重置计时起点），不用重启任何东西。
 	// watchFile 对"文件还不存在"的情况同样有效（创建时也会触发）。
-	const onPetSettingsChanged = (): void => { syncPetTickFromSettings('settings file'); };
+	// 「编辑语料」走的是**同一个文件**：桌宠把 openCorpusSeq 加一，
+	// 这里看到序号变大就打开语料文件并回执。
+	// 先把当前序号记为"已处理"：上一次会话里点过的请求不该在重启后被重放。
+	lastCorpusOpenSeq = Number(readCorpusOpenSeq()) || 0;
+	const onPetSettingsChanged = (): void => {
+		syncPetTickFromSettings('settings file');
+		void openCorpusIfRequested();
+	};
 	fs.watchFile(PET_SETTINGS_PATH, { interval: PET_SETTINGS_POLL_MS }, onPetSettingsChanged);
 	context.subscriptions.push(new vscode.Disposable(
 		() => fs.unwatchFile(PET_SETTINGS_PATH, onPetSettingsChanged)));
@@ -225,6 +239,58 @@ const PET_SETTINGS_PATH = path.join(os.homedir(), '.dsh', 'pets',
 
 /** 设置文件轮询间隔：菜单点一下要"立刻"生效，默认的 5s 粒度太钝。 */
 const PET_SETTINGS_POLL_MS = 500;
+
+/** 桌宠的台词库（语料）文件 —— 右键菜单「编辑语料」打开的就是它。
+ *  与设置文件同目录（~/.dsh/pets/），理由见 PET_SETTINGS_PATH：
+ *  桌宠跑的是 VSIX 安装副本，语料若放在安装目录里，下次升级就被覆盖。
+ *  扩展名用 .jsonc：VS Code 原生按"带注释的 JSON"处理它（语料文件里
+ *  有中文注释和尾逗号，纯 .json 会被标一屏红色波浪线）。 */
+const PET_CORPUS_PATH = path.join(os.homedir(), '.dsh', 'pets',
+	'airi-pet-corpus.jsonc');
+
+/** 已经处理过的「编辑语料」请求序号。
+ *  桌宠每点一次菜单就把 openCorpusSeq 加一写进设置文件；这里只处理
+ *  **严格大于** 上次的序号。启动时用文件里的当前值初始化 —— 否则"点击时
+ *  扩展没开着、由桌宠自己回落打开过一次"的请求，会在重启 VS Code 后被
+ *  当成新请求再打开一遍。 */
+let lastCorpusOpenSeq = 0;
+
+/** 读设置文件里的「编辑语料」请求序号；文件缺失/损坏返回 undefined。 */
+function readCorpusOpenSeq(): unknown {
+	try {
+		const data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8')) as
+			{ openCorpusSeq?: unknown };
+		return data?.openCorpusSeq;
+	} catch {
+		return undefined;
+	}
+}
+
+/** 设置文件变了 → 看看是不是桌宠点了「编辑语料」。
+ *
+ *  打开方式是三级回落的第一级：能在这里打开就不用去拉 `code` 命令
+ *  （那会在 VS Code 已经开着的时候再起一个窗口/抢焦点）。
+ *  打开之后必须**回执**给桌宠 —— 它正等这个信号来决定要不要往下回落。
+ */
+async function openCorpusIfRequested(): Promise<boolean> {
+	const seq = Number(readCorpusOpenSeq());
+	if (!Number.isFinite(seq) || seq <= lastCorpusOpenSeq) { return false; }
+	lastCorpusOpenSeq = seq;
+
+	let ok = false;
+	try {
+		const doc = await vscode.workspace.openTextDocument(
+			vscode.Uri.file(PET_CORPUS_PATH));
+		void vscode.window.showTextDocument(doc, { preview: false });
+		ok = true;
+	} catch (err) {
+		console.log(`[airi-monitor] open corpus failed: ${String(err)}`);
+	}
+	console.log(`[airi-monitor] corpus open request seq=${seq} ok=${ok}`);
+	postJsonToPet('/event',
+		{ type: 'corpusOpened', payload: { ok, method: 'vscode', seq } });
+	return ok;
+}
 
 /** 当前生效的响应周期（毫秒）。由设置文件驱动，不再写死。 */
 let petTickMs = PET_TICK_DEFAULT_MS;
@@ -544,23 +610,29 @@ async function launchStandalonePet(): Promise<void> {
 // pushToStandalone() — HTTP POST 到独立桌宠服务器
 // ============================================================================
 
-function pushToStandalone(message: unknown): void {
+/** 向桌宠服务器 POST 一段 JSON。桌宠没起来时静默跳过（这是常态，不是错误）。
+ *  @param path '/push'（推消息给桌宠）或 '/event'（上报事件） */
+function postJsonToPet(path: string, message: unknown, timeoutMs = 500): void {
 	try {
 		const body = JSON.stringify(message);
 		const req = http.request({
-			hostname: '127.0.0.1', port: STANDALONE_PORT, path: '/push',
+			hostname: '127.0.0.1', port: STANDALONE_PORT, path,
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 				'Content-Length': Buffer.byteLength(body),
 			},
-			timeout: 500,
+			timeout: timeoutMs,
 		}, () => { /* 忽略响应 */ });
 		req.on('error', () => { /* 服务器未运行，静默跳过 */ });
 		req.on('timeout', () => { req.destroy(); });
 		req.write(body);
 		req.end();
 	} catch { /* 静默失败 */ }
+}
+
+function pushToStandalone(message: unknown): void {
+	postJsonToPet('/push', message);
 }
 
 // ============================================================================
