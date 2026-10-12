@@ -12,6 +12,8 @@ import sys
 import os
 import json
 import random
+import shutil
+import subprocess
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -33,6 +35,15 @@ try:
 except Exception as e:
     _backend_available = False
     print(f'[airi-standalone] WARNING: Python backend not available: {e!r}')
+
+# 台词库（语料）。单独 try：它是**用户可编辑**的，而且点击台词也归它管
+# （原来的 CLICK_LINES 已迁进 corpus.py）—— 不能因为 response_generator
+# 那条链出问题就连"点一下有反应"都没了。
+try:
+    import corpus
+except Exception as e:
+    corpus = None
+    print(f'[airi-standalone] WARNING: corpus module not available: {e!r}')
 
 # ---------------------------------------------------------------------------
 # 启动诊断 —— 同时打控制台和落盘
@@ -106,6 +117,19 @@ def clamp_detect_sec(value):
     return max(DETECT_MIN_SEC, min(DETECT_MAX_SEC, n))
 
 
+def _as_seq(value):
+    """把任意输入收敛成非负整数序号（「编辑语料」请求的计次）。
+
+    ⚠️ 必须连 OverflowError 一起兜住：Python 的 json 默认接受字面量 Infinity，
+    `int(float('inf'))` 抛的就是它 —— 与 clamp_detect_sec 同源的老坑。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return n if n > 0 else 0
+
+
 def load_settings():
     """读设置文件；缺失/损坏/字段类型不对一律回落默认值 ——
     一个坏掉的设置文件不该有能力让桌宠起不来。"""
@@ -113,10 +137,11 @@ def load_settings():
         with open(SETTINGS_PATH, encoding='utf-8') as fh:
             data = json.load(fh)
         if isinstance(data, dict):
-            return {'detectIntervalSec': clamp_detect_sec(data.get('detectIntervalSec'))}
+            return {'detectIntervalSec': clamp_detect_sec(data.get('detectIntervalSec')),
+                    'openCorpusSeq': _as_seq(data.get('openCorpusSeq'))}
     except Exception:
         pass
-    return {'detectIntervalSec': DETECT_DEFAULT_SEC}
+    return {'detectIntervalSec': DETECT_DEFAULT_SEC, 'openCorpusSeq': 0}
 
 
 def save_settings(new):
@@ -149,7 +174,129 @@ def settings_payload():
     范围随 payload 一起发，前端就不用自己写死 1 和 60（写死了早晚和这里不一致）。"""
     return {'detectIntervalSec': settings['detectIntervalSec'],
             'min': DETECT_MIN_SEC,
-            'max': DETECT_MAX_SEC}
+            'max': DETECT_MAX_SEC,
+            'openCorpusSeq': settings.get('openCorpusSeq', 0)}
+
+
+# ---------------------------------------------------------------------------
+# 「编辑语料」的打开流程（v0.3.29）
+# ---------------------------------------------------------------------------
+# 三级回落，优先级从高到低：
+#   1. **扩展用 VS Code 打开** —— 复用 0.3.28 建好的那条通道：这里把
+#      openCorpusSeq 加一写进设置文件，扩展 fs.watchFile 看到序号变了就
+#      openTextDocument 打开 .jsonc（VS Code 原生按"带注释的 JSON"处理），
+#      然后 POST /event {type:'corpusOpened'} 回执。
+#   2. **code 命令** —— 扩展没在跑（用户直接 start.bat 起的桌宠）时兜底。
+#   3. **系统默认程序** —— 前两条都不通时 os.startfile。`.jsonc` 没关联的话
+#      Windows 会弹一次"选择打开方式"，这是可接受的降级。
+#
+# 为什么要在第 1 步"等回执"而不是直接顺序执行：扩展在跑的时候不该再去拉起
+# 一个 VS Code（code 命令会新开窗口/抢焦点）。回执就是"有人接单了"的信号；
+# 超时没等到才往下走。回执**不是** HTTP 轮询 —— 就是本文件里一个 Event。
+CORPUS_OPEN_ACK_TIMEOUT = 2.5   # 秒。扩展轮询设置文件 500ms 一拍，够宽裕了
+
+_corpus_open_lock = threading.Lock()
+#: seq -> {'event': Event, 'ok': bool, 'method': str|None}
+_corpus_open_wait = {}
+
+
+def _corpus_open_ack(seq, ok, method):
+    """扩展回执入口（/event 的 corpusOpened 分支调）。@returns 是否有人等着它"""
+    try:
+        seq = int(seq)
+    except (TypeError, ValueError):
+        return False
+    with _corpus_open_lock:
+        slot = _corpus_open_wait.get(seq)
+        if slot is None:
+            return False
+        slot['ok'] = bool(ok)
+        slot['method'] = str(method or '')
+        slot['event'].set()
+        return True
+
+
+def _launch_code_cli(path):
+    """用 `code` 命令行打开（2 级回落）。@returns 方法名或 None"""
+    exe = (shutil.which('code') or shutil.which('code.cmd')
+           or shutil.which('code-insiders') or shutil.which('code-insiders.cmd'))
+    if not exe:
+        return None
+    try:
+        # ⚠️ `code` 在 Windows 上是 .cmd 批处理。CreateProcess 不能直接执行
+        #    .cmd，必须经 cmd.exe —— 而 cmd.exe 的 /c 需要用 shell 语义拼串。
+        #    这里用 subprocess 的 list 形式 + shell=True：list 形式会保留参数
+        #    边界（路径含空格也不怕），shell=True 才让 .cmd 跑得起来。
+        kwargs = {}
+        if os.name == 'nt':
+            kwargs['creationflags'] = 0x00000008 | 0x08000000  # DETACHED|NO_WINDOW
+        subprocess.Popen('%s "%s"' % (exe, path), shell=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, **kwargs)
+        return 'code-cli'
+    except OSError:
+        return None
+
+
+def _open_corpus_fallback(path):
+    """2 级 / 3 级回落。@returns 方法名或 None（全挂）"""
+    method = _launch_code_cli(path)
+    if method:
+        return method
+    if os.name == 'nt' and hasattr(os, 'startfile'):
+        try:
+            os.startfile(path)          # noqa: S606 - 打开用户自己的语料文件
+            return 'system-default'
+        except OSError:
+            return None
+    return None
+
+
+def _open_corpus_worker(seq):
+    """后台线程：确保文件存在 → 等扩展回执 → 没等到就逐级回落 → 说一句结果。"""
+    path = None
+    try:
+        if corpus is None:
+            raise RuntimeError('corpus module not available')
+        path = corpus.ensure_corpus_file()
+    except Exception as exc:
+        log('[airi-corpus] ensure failed: %r' % (exc,))
+        push_message('errorAlert', '唔…台词库文件没生成出来，我看下日志再说。', 'angry')
+        return
+
+    slot = {'event': threading.Event(), 'ok': False, 'method': None}
+    with _corpus_open_lock:
+        _corpus_open_wait[seq] = slot
+    try:
+        got = slot['event'].wait(CORPUS_OPEN_ACK_TIMEOUT)
+    finally:
+        with _corpus_open_lock:
+            _corpus_open_wait.pop(seq, None)
+
+    if got and slot['ok']:
+        log('[airi-corpus] opened in VS Code (seq=%d, by=%s)'
+            % (seq, slot['method'] or 'extension'))
+        push_message('chatMessage',
+                     '台词库给你在 VS Code 里打开了，改完保存就生效，不用重启我。',
+                     'greeting')
+        return
+    if got:
+        # 扩展接了单但打开失败（文件被占/权限…）—— 继续走回落，并留痕
+        log('[airi-corpus] extension could not open it (seq=%d) -> fallback' % seq)
+
+    method = _open_corpus_fallback(path)
+    if method == 'code-cli':
+        log('[airi-corpus] opened via code CLI (seq=%d)' % seq)
+        push_message('chatMessage',
+                     '台词库打开了（用 code 命令）。改完保存就生效。', 'greeting')
+    elif method == 'system-default':
+        log('[airi-corpus] opened via system default app (seq=%d)' % seq)
+        push_message('chatMessage',
+                     '台词库放到你默认的编辑器里了。改完保存就生效。', 'greeting')
+    else:
+        log('[airi-corpus] could not open corpus file (seq=%d, path=%s)' % (seq, path))
+        push_message('errorAlert',
+                     '唔，我打不开这个文件，你手动去这儿找它：%s' % path, 'angry')
 
 
 
@@ -238,36 +385,15 @@ _api_ref = None   # main() 里创建 WindowAPI 后回填，供 push_message 检�
 # 每池多放几条，点着才不像复读机。
 # 情绪词必须和 ui.html 的 EMOTION_EXPRESSION 对得上
 # （idle / greeting / angry / happy / surprised），否则表情切不过去。
-CLICK_LINES = {
-    'head': (
-        ('唔…别摸头啦，会长不高的。', 'surprised'),
-        ('头发会乱的，你赔得起吗。', 'angry'),
-        ('……再摸一下也行。就一下。', 'happy'),
-        ('摸头杀对我没用哦，快去写代码。', 'greeting'),
-        ('…今天格外温柔？才、才没有因为你摸就开心！', 'happy'),
-        ('头很贵的，摸一次收你一行 bug。', 'angry'),
-        ('呜…突然伸手过来，吓我一跳！', 'surprised'),
-    ),
-    'body': (
-        ('干嘛？我没偷懒，我在思考。', 'surprised'),
-        ('你这个 bug 还没改完呢，别戳我。', 'angry'),
-        ('戳我一次，我就少看你一行代码。', 'happy'),
-        ('需要我帮你看报错吗？我不嫌你菜。', 'greeting'),
-        ('别戳了别戳了，痒！', 'surprised'),
-        ('有事说事，没事就回去看报错。', 'idle'),
-        ('哼，想搭讪就直接说嘛。', 'happy'),
-    ),
-    'desk': (
-        ('桌子是我的地盘，手拿开。', 'angry'),
-        ('我在画图呢，别碰。', 'surprised'),
-        ('……这张桌子陪我改过通宵的。', 'happy'),
-        ('要不要一起喝点什么？你请。', 'greeting'),
-        ('桌面整洁是你的事，代码整洁是我的事。', 'idle'),
-        ('在我桌上放咖啡？你是故意的吧！', 'angry'),
-        ('这张桌子的第一主人是我，你排第二。', 'greeting'),
-    ),
-}
+#
+# ⚠️ v0.3.29 起台词**不再写在这里**：点击台词和诊断台词一起归 corpus.py 管
+#    （右键菜单「编辑语料」能改的就是它）。这里保留一个只读别名，纯粹是为了
+#    让探针（live2d_probe/verify_click_region.py）还能 `standalone.CLICK_LINES`
+#    地做结构/情绪检查 —— 真值只有一份，就在 corpus.py。
+CLICK_LINES = corpus.CLICK_LINES if corpus is not None else {}
 
+#: 兜底台词：corpus 模块不可用（安装残缺）时至少还"点得动"，不至于点了没反应
+_CLICK_FALLBACK = (('唔……', 'idle'),)
 
 _last_pick = {}   # zone -> 上次选中的下标（避免连点两句一样，2026-09-23 日志实锤 #9/#10 复读）
 
@@ -276,8 +402,11 @@ def _pick_click_line(zone):
 
     用量小而固定的本地语料，不走 response_generator —— 那个是给"诊断事件"
     生成回复的，点一下角色要的是**立刻**有反应，不该去碰网络/DEEPSEEK 那条路。
+    取词走 corpus.get_click_lines()：**用户语料优先、缺失/写坏回落内置**。
     """
-    pool = CLICK_LINES.get(zone) or CLICK_LINES['body']
+    pool = corpus.get_click_lines(zone) if corpus is not None else None
+    if not pool:
+        pool = _CLICK_FALLBACK
     last = _last_pick.get(zone, -1)
     if len(pool) > 1:
         # 池里多于一句时，只从"不是上一句"的里面挑 —— 连点不复读
@@ -514,6 +643,18 @@ class AiriHandler(BaseHTTPRequestHandler):
                     else:
                         log('[airi-js] bridge ping FAIL %s'
                             % json.dumps(p, ensure_ascii=False))
+                elif kind == 'corpusOpened':
+                    # 扩展对「编辑语料」的回执（v0.3.29）。它不是页面事件，
+                    # 是扩展告诉我们"这次打开我接单了 / 我失败了" ——
+                    # 收到就唤醒 _open_corpus_worker，让它别再走 code 命令回落
+                    # （否则会在扩展已经打开的情况下再拉起一个 VS Code）。
+                    p = msg.get('payload') or {}
+                    seq = p.get('seq')
+                    handled = _corpus_open_ack(seq, p.get('ok'), p.get('method'))
+                    if not handled:
+                        # 迟到的回执（超时后回落已经接管）—— 只留痕，不重复说话
+                        log('[airi-corpus] late ack for seq=%s (ok=%s)'
+                            % (seq, p.get('ok')))
             except Exception as exc:
                 log(f'[airi-standalone] /event parse failed: {exc!r}')
             self._json_response({'status': 'ok'})
@@ -531,7 +672,29 @@ class AiriHandler(BaseHTTPRequestHandler):
                 msg = json.loads(body)
             except Exception:
                 msg = None
-            if not isinstance(msg, dict) or 'detectIntervalSec' not in msg:
+            if not isinstance(msg, dict):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b'{"error":"bad request"}')
+                return
+            if msg.get('openCorpus'):
+                # 「编辑语料」：只把序号加一写进设置文件 —— 扩展 watch 到它
+                # 变了就会打开语料文件并回执。真正的打开动作在后台线程里做，
+                # 因为要等回执（最多 CORPUS_OPEN_ACK_TIMEOUT 秒），
+                # 不能在 HTTP 线程里阻塞前端。
+                with settings_lock:
+                    seq = _as_seq(settings.get('openCorpusSeq')) + 1
+                    settings['openCorpusSeq'] = seq
+                    saved = save_settings(settings)
+                log('[airi-corpus] open requested (seq=%d, saved=%s)' % (seq, saved))
+                threading.Thread(target=_open_corpus_worker, args=(seq,),
+                                 daemon=True).start()
+                self._json_response({'ok': True, 'openCorpusSeq': seq,
+                                     'saved': saved})
+                return
+            if 'detectIntervalSec' not in msg:
                 # 这条路径没有"把文本当消息说话"的语义（区别于 /push），
                 # 拿不准就当坏请求，别顺手改掉用户设好的值。
                 self.send_response(400)
@@ -739,4 +902,18 @@ if __name__ == '__main__':
     log('[airi-settings] detect interval = %ds (min=%d max=%d, file=%s)'
         % (settings['detectIntervalSec'], DETECT_MIN_SEC, DETECT_MAX_SEC,
            SETTINGS_PATH))
+    if corpus is not None:
+        # 语料模块的内部日志（读盘失败/丢弃了多少条）接到这份排障日志上。
+        # 用户改了语料说"怎么没生效"时，答案就在这几行里。
+        corpus.set_log_hook(log)
+        # 启动就确保文件存在（存在则什么都不做）。放在这里而不是"等用户点
+        # 菜单才生成"：这样用户直接去 ~/.dsh/pets/ 就能找到它改；
+        # 用户把文件删了想"恢复出厂"，下次启动也会自动长回来。
+        corpus.ensure_corpus_file()
+        _cs = corpus.corpus_status()
+        log('[airi-corpus] file=%s exists=%s scenes(user)=%d clicks(user)=%d '
+            'dropped=%d%s'
+            % (_cs['path'], _cs['exists'], _cs['scenes_from_user'],
+               _cs['clicks_from_user'], _cs['dropped'],
+               (' error=%s' % _cs['error']) if _cs['error'] else ''))
     main()
