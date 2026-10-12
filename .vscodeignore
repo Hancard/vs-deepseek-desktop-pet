@@ -15,4 +15,5 @@ live2d_probe/**
 # 运行日志与测试残留不进 VSIX（vsce 只认 .vscodeignore，不看 .gitignore）
 **/*.log
 desktop_pet/_clamp_test.txt
+desktop_pet/_probe_*.html
 *.vsix
