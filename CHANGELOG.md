@@ -1,5 +1,81 @@
 # Change Log
 
+## [0.3.27] — 2026-10-12
+
+> 例行审计。本轮的核心收获**不是一个新 bug，而是把上一轮那条"根因未定"的悬案
+> 结掉了 —— 它根本不是产品 bug，是我自己的测试打进来的噪声**，而上一轮的
+> CHANGELOG 把它当成产品问题记了账。顺带修了一个测试产物写进产品目录的小毛病。
+
+### Fixed
+
+- **测试污染生产排障日志**（`desktop_pet/standalone.py` + 5 个测试）：
+  `test_push_hardening.py` / `test_file_scan.py` / `test_push_e2e.py` /
+  `test_sse_resume.py` / `test_response_generator_hardening.py` 都是
+  `import standalone` 之后直接起**进程内**生产服务器的，于是**测试自己的请求流
+  也会走生产代码的 `log()`**，落点就是开发者那份 `desktop_pet/.airi-pet.log`。
+  其中 `test_push_hardening.py` 有一条**故意投毒**的非 UTF-8 `/event` 用例
+  （`b'\xff\xfe\xfd not utf8 \xc3\x28'`）→ `json.loads` 抛 JSONDecodeError →
+  `log('[airi-standalone] /event parse failed: ...')`。
+  定量证据：
+  - 跑前 `parse failed` 3 行 / 2720 字节 → 跑后 4 行 / 2832 字节，**+112 = 恰好一行**；
+  - 逐个测量其余四个测试：全部 +0 字节 → 唯一污染源就是它；
+  - 新增的 `test_pet_log_isolation.py` 把这条链路做成了可复现的断言（第 3 条的
+    替身日志 `tmp_size=112` 也正好复现这个字节数）。
+  危害不只是"日志脏"：`/event` 的 `except` 分支**不打印 body**（见 0.3.25 的
+  加固），所以日志里无法分辨是谁发的 —— 一个假线索配上一条不能自证的日志，
+  直接让上一轮把它当成"产品里来路不明的 parse 失败"记账。
+  修法：`LOG_PATH = os.environ.get('AIRI_PET_LOG') or <默认路径>`，
+  5 个测试在 `import standalone` **之前**把 `AIRI_PET_LOG` 指向 `%TEMP%`。
+  **必须在 import 之前**：`LOG_PATH` 是模块加载时算出来的，而
+  `test_sse_resume.py` 的路子（自建 `ThreadingHTTPServer(standalone.AiriHandler)`
+  后立刻 `serve_forever()`）没有 ready 等待，import 之后再改会有竞态。
+- **`test_push_e2e.py` 把结果写进产品目录**：文件头 docstring 说结果写
+  `live2d_probe/_e2e_test.txt`，代码却写的是 `os.path.join(ROOT, '_e2e_test.txt')`
+  而 `ROOT` = `desktop_pet/` → 实际落在 `desktop_pet/_e2e_test.txt`。
+  两处后果：产品目录里多出一个测试产物；该路径既不在 `.gitignore`
+  也不在 `.vscodeignore` 里（`live2d_probe/.gitignore` 的 `_*` 规则罩不到它），
+  会挂进 `git status`、还可能被打进 VSIX。**是代码错、docstring 对**，
+  改代码写进 `live2d_probe/`；顺带删掉已生成的 `desktop_pet/_e2e_test.txt`。
+
+### Changed
+
+- 5 个测试的 `sys.path.insert(r'S:\My event\...')` 硬编码路径改为按
+  `os.path.dirname(os.path.abspath(__file__))` 推算 —— 仓库换目录/别人克隆后
+  不再指着一个不存在的路径；输出文件名同步走 `_HERE`。
+- `.vscodeignore` 补 `desktop_pet/_probe_*.html`：上一轮只补了 `_clamp_test.txt`，
+  而 `_probe_*.html` 是 `gen_ui_probe.py` 给用户用的诊断产物，同样不该进 VSIX
+  （vsce 只认 `.vscodeignore`，不看 `.gitignore`，这是 0.3.26 记下过的坑）。
+- `desktop_pet/assets/README.md` 标题 `# Airi 角色立绘目录` → `deepseek`
+  （0.3.23/0.3.24 改名审计的又一处用户可见面残留）。同文件的
+  `AIRI_CHARACTER_IMAGE` 是环境变量名，属有意保留的内部标识符，不动。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_log_isolation.py`（4 条断言，全绿）：
+  ① 不设 `AIRI_PET_LOG` 时 `LOG_PATH` 仍指向 `desktop_pet/.airi-pet.log`（默认行为不变）；
+  ② 设了之后 `LOG_PATH` 跟着走；③ 隔离下投毒 `/event`：替身日志**收到**
+  `parse failed` 行（证明"没写进真实日志"不是因为压根没触发），真实日志纹丝不动；
+  ④ 真跑一遍 `test_push_hardening.py`：真实日志字节数与 `parse failed` 计数都不变
+  —— 这条是真正的回归闸门，谁把测试里那行 `AIRI_PET_LOG` 删了它就红。
+- 旧文件 `desktop_pet/.airi-pet.log` 里遗留的 5 条假 `parse failed` **未手工清理**：
+  该文件每次启动由 `_init_log()` 截断重写，且已 gitignore、不进 VSIX，
+  留着它正好是这条证据链的现场（下一次手动启动桌宠即归零）。
+
+### 本轮排除（避免误诊，都查过且判为不改）
+
+- `watcher.py` 的 `watch_single_file` payload 缺 `'language'` 键：走
+  `standalone` 的 `trigger`/`error_count` 直通分支 → `generate_response` 里
+  `context.get('language', 'python')` 有默认值 → `{language}` 语料不会残留占位符，
+  **无用户可见后果**（`directory` 分支的写法不统一，属洁癖，非 bug）。
+- `python_backend/main.py` 的 `item.get("languageId")` 在 item 非 dict 时会
+  AttributeError：被 `except Exception: pass` 吞掉，且该模块**是死代码**
+  （`src/extension.ts` 只 spawn `standalone.py`）。
+- `common.get_dpi_scale()` 把 scale < 1.0 抬到 1.0：有意为之（低于 100% 不缩放）。
+- `package.json` 没写 `extensionKind`：无法证实有实际影响，不改（不认没有证据的猜测）。
+- `README.md` 那行 `| \`Airi\` | 33×15.6 | 3 | 39×21.6 | **40×20** ✓ |`：这是当年
+  用户截图里**名牌文字**的实测对账行。名牌文案 0.3.22 已改成 `deepseek`
+  （比 `Airi` 长），但重测需要真开 GUI —— 本轮**不编数字**，留作待办。
+
 ## [0.3.26] — 2026-10-11
 
 > 例行审计：一个真 bug（`'2d'` 回退路径的轮廓/点击上下镜像）+ 一处改名漏网
@@ -67,6 +143,12 @@
   JSONDecodeError('Expecting value: line 1 column 1 (char 0)')`（10-10、10-11
   各一条）**根因未定**：扩展侧发的是合法 JSON，`print()` 又不含 body，
   无法从日志分辨是谁发的。本轮不改，先记账。
+  → **0.3.27 更正：这条是假线索，把它当"产品的悬案"记账本身就是被它带偏了。**
+  它不是产品发出来的，是 `live2d_probe/test_push_hardening.py` 跑测试时打进去的
+  —— 该测试有一条**故意投毒**的非 UTF-8 `/event` 用例，而测试是 `import standalone`
+  后直接起**进程内**服务器，`log()` 的落点就是这份真实日志。见 0.3.27。
+  教训：这条日志头部写着"每次启动重写"，我据此假设"里面只可能是产品自己写的"，
+  但测试进程从来不调 `_init_log()`，所以它只追加、不重写 —— 假设错了。
 
 ## [0.3.25] — 2026-10-10
 
