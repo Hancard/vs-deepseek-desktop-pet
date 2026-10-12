@@ -13,14 +13,19 @@
  * 【数据流】
  *   VS Code 诊断变化 → handleDiagnosticsChanged
  *     → 仅标记 diagPushPending（Webview 面板实时更新，桌宠不实时打扰）
- *     → 桌宠响应时钟（30s 周期，唤醒时重置起点）→ pushPendingDiagnostics
+ *     → 桌宠响应时钟（周期可配，默认 30s，唤醒时重置起点）→ pushPendingDiagnostics
  *       → POST http://127.0.0.1:19876/push
  *         → standalone 内建 generate_response → SSE → 桌宠气泡
  *
  *   当前文件 bug 监视（file scan watchdog）→ scanActiveFile
- *     → 与诊断推送共用同一个 30s 周期时钟（petTick）：
+ *     → 与诊断推送共用同一个可配周期时钟（petTick）：
  *       bug 变化推送；未变化每 60s 提醒；修到 0 说一次"文件干净"后沉默
  *     → POST /push {trigger: 'file_scan', file, error_count, sample_errors}
+ *
+ * 【检测周期怎么改】
+ *   右键桌宠 →「检测周期」→ 1~60 秒（默认 30）。桌宠把值写进
+ *   ~/.dsh/pets/airi-pet-settings.json，这里 fs.watchFile 监听它并立刻换周期。
+ *   通道为什么是文件、以及为什么只有 Python 一个写入方，见 PET_SETTINGS_PATH。
  */
 
 import * as vscode from 'vscode';
@@ -83,8 +88,8 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push(diagnosticsDisposable);
 
-	// --- 桌宠响应时钟（30s 周期）---
-	// 诊断变化与当前文件扫描共用这一个节奏：每 30 秒最多主动说一条。
+	// --- 桌宠响应时钟（周期由桌宠侧设置文件决定，默认 30s）---
+	// 诊断变化与当前文件扫描共用这一个节奏：每 N 秒最多主动说一条。
 	//   * 诊断变化只标脏（diagPushPending），tick 时才真正推送
 	//     —— 敲代码时每个字母触发的诊断事件不再实时打扰桌宠
 	//   * scanActiveFile 在同一 tick 里跑：bug 变化推送、未变化按冷却提醒、
@@ -92,10 +97,20 @@ export function activate(context: vscode.ExtensionContext) {
 	//   * 两条路径同拍都想说话时当前文件优先（诊断脏标记留到下一拍，
 	//     避免一拍冒两个气泡）
 	// 桌宠被唤醒（launchStandalonePet 成功）时重置计时起点。
+	petTickMs = readDetectIntervalMs() ?? PET_TICK_DEFAULT_MS;
 	startPetTick();
 	context.subscriptions.push(new vscode.Disposable(() => {
 		if (petTickTimer) { clearInterval(petTickTimer); petTickTimer = undefined; }
 	}));
+
+	// --- 监听桌宠的「检测周期」设置 ---
+	// 右键桌宠 →「检测周期」改的就是它：桌宠把值写进 PET_SETTINGS_PATH，
+	// 这里 watch 到变化立刻换周期（并重置计时起点），不用重启任何东西。
+	// watchFile 对"文件还不存在"的情况同样有效（创建时也会触发）。
+	const onPetSettingsChanged = (): void => { syncPetTickFromSettings('settings file'); };
+	fs.watchFile(PET_SETTINGS_PATH, { interval: PET_SETTINGS_POLL_MS }, onPetSettingsChanged);
+	context.subscriptions.push(new vscode.Disposable(
+		() => fs.unwatchFile(PET_SETTINGS_PATH, onPetSettingsChanged)));
 
 	// --- 启动时扫描已有诊断（有错误才处理，干净启动不打扰） ---
 	// Webview 诊断面板改为按需打开：命令 "Open Anime Assistant"
@@ -113,7 +128,8 @@ export function activate(context: vscode.ExtensionContext) {
 	vscode.window.showInformationMessage('deepseek Monitor 已就绪 — 诊断消息将转发到桌宠', '启动桌宠').then((selection) => {
 		if (selection === '启动桌宠') { void vscode.commands.executeCommand('vscode-anime-assistent.launchPet'); }
 	});
-	console.log(`[airi-monitor] Ready. Push target: http://127.0.0.1:${STANDALONE_PORT}/push`);
+	console.log(`[airi-monitor] Ready. Push target: http://127.0.0.1:${STANDALONE_PORT}/push`
+		+ ` , detect interval: ${petTickMs / 1000}s`);
 }
 
 // ============================================================================
@@ -182,11 +198,36 @@ function collectErrors(uris?: readonly vscode.Uri[]): ErrorItem[] {
 // scanActiveFile() — 当前文件 bug 监视（file scan watchdog）
 // ============================================================================
 
-/** 桌宠主动响应周期：30 秒一拍（用户指定）。
+/** 桌宠主动响应周期默认值：30 秒一拍（用户指定）。
+ *  ⚠️ 现在这只是**默认值** —— 实际周期由桌宠侧的设置文件决定
+ *  （右键菜单「检测周期」可改，范围 1~60 秒），见 PET_SETTINGS_PATH。
  * 诊断变化只标脏，真正的推送在这一拍里做——敲代码时的每次诊断事件
  * 都不再实时打扰；"以桌宠被唤醒开始计时"由 launchStandalonePet 成功后
  * 调 startPetTick() 重置起点实现。 */
-const PET_TICK_MS = 30000;
+const PET_TICK_DEFAULT_MS = 30000;
+
+/** 「检测周期」的合法范围（秒），与 standalone.py 的 DETECT_MIN/MAX_SEC 对齐。
+ *  两边都夹一次是故意的：设置文件是可以被手改的，扩展不能假设它一定合法。 */
+const DETECT_MIN_SEC = 1;
+const DETECT_MAX_SEC = 60;
+
+/** 桌宠的设置文件（**Python 侧是唯一写入方**，扩展只读）。
+ *
+ *  为什么走文件而不是让扩展轮询桌宠的 HTTP：
+ *  菜单在桌宠页面里，跑的却是扩展的时钟 —— 两边之间原本没有任何
+ *  「桌宠 → 扩展」的反向通道（扩展只在 /push 上一路往桌宠送）。用
+ *  「Python 落盘 + 这里 fs.watchFile」当通道：单写入方不会互相覆盖、
+ *  天然持久化、不产生每秒一次的轮询请求。
+ *  路径必须与 standalone.py 的 SETTINGS_PATH 一致（~/.dsh/pets/，与
+ *  Live2D core 缓存同目录）。 */
+const PET_SETTINGS_PATH = path.join(os.homedir(), '.dsh', 'pets',
+	'airi-pet-settings.json');
+
+/** 设置文件轮询间隔：菜单点一下要"立刻"生效，默认的 5s 粒度太钝。 */
+const PET_SETTINGS_POLL_MS = 500;
+
+/** 当前生效的响应周期（毫秒）。由设置文件驱动，不再写死。 */
+let petTickMs = PET_TICK_DEFAULT_MS;
 
 /** 响应时钟句柄（startPetTick 重置起点用） */
 let petTickTimer: NodeJS.Timeout | undefined;
@@ -194,16 +235,43 @@ let petTickTimer: NodeJS.Timeout | undefined;
 /** 诊断是否有未推送到桌宠的变化（petTick 消费后清零） */
 let diagPushPending = false;
 
-/** 启动/重置桌宠响应时钟（30s 从现在起算） */
+/** 读桌宠设置里的检测周期（毫秒）；文件缺失/损坏/字段非法一律返回 undefined
+ *  （调用方保持当前值，不要因为一个坏文件把周期打成默认值）。 */
+function readDetectIntervalMs(): number | undefined {
+	try {
+		const data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8')) as
+			{ detectIntervalSec?: unknown };
+		const sec = Number(data?.detectIntervalSec);
+		if (!Number.isFinite(sec)) { return undefined; }
+		const clamped = Math.max(DETECT_MIN_SEC, Math.min(DETECT_MAX_SEC, Math.round(sec)));
+		return clamped * 1000;
+	} catch {
+		return undefined;
+	}
+}
+
+/** 把设置文件里的周期同步到时钟上（变了才重启时钟）。
+ *  @returns 是否发生了变化 */
+function syncPetTickFromSettings(source: string): boolean {
+	const ms = readDetectIntervalMs();
+	if (ms === undefined || ms === petTickMs) { return false; }
+	const prev = petTickMs;
+	petTickMs = ms;
+	startPetTick();   // 重启时钟：新周期从现在起算（与"唤醒时重置起点"一致）
+	console.log(`[airi-monitor] detect interval ${prev / 1000}s -> ${ms / 1000}s (${source})`);
+	return true;
+}
+
+/** 启动/重置桌宠响应时钟（从当前周期从现在起算） */
 function startPetTick(): void {
 	if (petTickTimer) { clearInterval(petTickTimer); }
-	petTickTimer = setInterval(petTick, PET_TICK_MS);
+	petTickTimer = setInterval(petTick, petTickMs);
 }
 
 /** 桌宠响应时钟的一拍：**一拍只说一条**。
  *  优先当前文件（更具体、带行号），它没话说时才轮到工作区诊断。
  *  两条同拍都推 = 气泡瞬间叠两个（前端 MAX_BUBBLES=2），
- *  违背"每 30 秒主动响应一次"的约定。 */
+ *  违背"每一拍最多主动响应一次"的约定（周期见 petTickMs）。 */
 function petTick(): void {
 	if (scanActiveFile()) { return; }
 	if (!diagPushPending) { return; }
@@ -217,7 +285,7 @@ function petTick(): void {
 }
 
 /** 把积压的诊断状态推送到桌宠（原 handleDiagnosticsChanged 的推送逻辑，
- *  从实时路径移入 30s 周期时钟）
+ *  从实时路径移入周期时钟 petTick）
  *  @returns 本批是否已消费（false = 桌宠不可达，调用方需保留脏标记） */
 async function pushPendingDiagnostics(): Promise<boolean> {
 	if (!(await checkStandaloneAlive())) { return false; }
@@ -357,13 +425,13 @@ function handleDiagnosticsChanged(): void {
 	if (workspaceErrors.length > 0) { hadRelevantErrors = true; }
 
 	// 发送到 Webview 备用面板（同样使用工作区整体口径，避免误导）
-	// 面板是用户主动打开的，保持实时；桌宠气泡走 30s 响应时钟
+	// 面板是用户主动打开的，保持实时；桌宠气泡走响应时钟（petTick）
 	postToWebview({
 		type: 'diagnostics',
 		payload: { count: workspaceErrors.length, items: workspaceErrors.slice(0, 20), timestamp: new Date().toISOString() }
 	});
 
-	// 标脏即可：真正的推送在下一个 30s 响应 tick（petTick → pushPendingDiagnostics）。
+	// 标脏即可：真正的推送在下一个响应 tick（petTick → pushPendingDiagnostics）。
 	// 此前这里是实时推送——每敲一个字母触发诊断变化，桌宠就收到并报一次。
 	diagPushPending = true;
 }
@@ -459,8 +527,8 @@ async function launchStandalonePet(): Promise<void> {
 			lastHealthCheckAt = Date.now();
 			vscode.window.showInformationMessage('deepseek 桌宠已启动，开始监视你的代码 (￣▽￣)');
 			void refreshPetStatus();
-			// 以桌宠被唤醒为起点重新计 30s：唤醒后先安静一个周期，
-			// 之后每 30s 才主动响应一次
+			// 以桌宠被唤醒为起点重新计时（周期 = 当前检测周期，默认 30s）：
+			// 唤醒后先安静一个周期，之后每一拍才主动响应一次
 			startPetTick();
 			return;
 		}
