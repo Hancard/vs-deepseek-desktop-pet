@@ -61,6 +61,98 @@ except Exception as e:
 LOG_PATH = os.environ.get('AIRI_PET_LOG') or os.path.join(_script_dir, '.airi-pet.log')
 
 
+# ---------------------------------------------------------------------------
+# 桌宠设置（右键菜单可改，v0.3.28）
+# ---------------------------------------------------------------------------
+# 「检测周期」= 扩展侧那个桌宠响应时钟（petTick）的间隔：每 N 秒，桌宠最多主动
+# 说一条（当前文件 bug 变化 / 工作区诊断变化）。范围 1~60 秒，默认 30 秒。
+#
+# 为什么设置存放在桌宠这一侧，而不是 VS Code 的 settings.json：
+#   菜单在桌宠页面里，而真正跑时钟的是扩展 —— 两边之间本来**没有任何
+#   「桌宠 → 扩展」的反向通道**（扩展只在 /push 上一路往桌宠送）。这里拿
+#   「桌宠落盘一个 JSON、扩展 fs.watchFile 监听它」当通道，好处是：
+#     * 只有桌宠一个写入方，不存在两边互相覆盖
+#     * 天然持久化（重启 VS Code / 重开桌宠都还在）
+#     * 扩展不需要轮询 HTTP（1 秒周期就意味着一秒一次本机请求）
+#   代价是两边要约定同一个路径 —— 用 ~/.dsh/pets/（Live2D core 缓存也在那儿，
+#   见 live2d_assets.py:ensure_core），不是为这个功能新发明的目录。
+#
+# ⚠️ 落点可用 AIRI_PET_SETTINGS 覆盖，**测试必须覆盖它**（与 AIRI_PET_LOG 同理）：
+#   测试若直接 POST /settings，改掉的是用户真实的检测周期。
+SETTINGS_PATH = (os.environ.get('AIRI_PET_SETTINGS')
+                 or os.path.join(os.path.expanduser('~'), '.dsh', 'pets',
+                                 'airi-pet-settings.json'))
+
+DETECT_MIN_SEC = 1        # 用户指定：最短 1 秒
+DETECT_MAX_SEC = 60       # 用户指定：最长 60 秒
+DETECT_DEFAULT_SEC = 30   # 与扩展 petTick 的默认值保持一致
+
+
+def clamp_detect_sec(value):
+    """把任意输入收敛成 [1, 60] 整数秒；坏输入回落默认值。
+
+    · 小数四舍五入取整 —— 与前端 setDetectSec 里的 Math.round 对齐。两边对
+      同一个值给出不同结果，迟早变成"界面显示 4 秒、实际跑 3 秒"这种鬼问题。
+    · ±Infinity / NaN / 字符串垃圾一律算"不可用" → 回落默认值。注意 Python 的
+      json **默认就接受**字面量 Infinity / NaN，所以这些值真的能走到这里；
+      而 round(float('inf')) 抛的是 OverflowError —— 只兜
+      (TypeError, ValueError) 会让这个请求 500 断连（与 0.3.17 / 0.3.25 那几轮
+      "畸形 body 炸穿链路"是同一类）。
+    """
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return DETECT_DEFAULT_SEC
+    return max(DETECT_MIN_SEC, min(DETECT_MAX_SEC, n))
+
+
+def load_settings():
+    """读设置文件；缺失/损坏/字段类型不对一律回落默认值 ——
+    一个坏掉的设置文件不该有能力让桌宠起不来。"""
+    try:
+        with open(SETTINGS_PATH, encoding='utf-8') as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return {'detectIntervalSec': clamp_detect_sec(data.get('detectIntervalSec'))}
+    except Exception:
+        pass
+    return {'detectIntervalSec': DETECT_DEFAULT_SEC}
+
+
+def save_settings(new):
+    """原子写：先写同目录临时文件再 os.replace。
+
+    扩展在 watch 这个文件，直接覆写会留给它一个"读到半截 JSON"的窗口。
+    @returns 是否落盘成功（失败不抛：设置只在内存里生效也比崩掉强）"""
+    tmp = SETTINGS_PATH + '.tmp'
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(new, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, SETTINGS_PATH)
+        return True
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+settings = load_settings()
+settings_lock = threading.Lock()
+
+
+def settings_payload():
+    """给前端和扩展的统一视图：当前值 + 合法范围。
+
+    范围随 payload 一起发，前端就不用自己写死 1 和 60（写死了早晚和这里不一致）。"""
+    return {'detectIntervalSec': settings['detectIntervalSec'],
+            'min': DETECT_MIN_SEC,
+            'max': DETECT_MAX_SEC}
+
+
+
 def log(msg=''):
     line = f'[{time.strftime("%H:%M:%S")}] {msg}'
     try:
@@ -303,6 +395,9 @@ class AiriHandler(BaseHTTPRequestHandler):
                 pass
         elif self.path == '/ping':
             self._json_response({'status': 'ok', 'server': 'airi-standalone'})
+        elif self.path == '/settings':
+            # 只读：右键菜单打开时同步当前值；也方便从外部（脚本/排障）查
+            self._json_response(settings_payload())
         else:
             self.send_response(404)
             self.end_headers()
@@ -422,6 +517,40 @@ class AiriHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 log(f'[airi-standalone] /event parse failed: {exc!r}')
             self._json_response({'status': 'ok'})
+        elif self.path == '/settings':
+            # 写设置（右键菜单「检测周期」）。只改这一个键，值一律夹到
+            # [DETECT_MIN_SEC, DETECT_MAX_SEC]；坏输入不猜、直接 400。
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+            except (TypeError, ValueError):
+                self.send_response(400)
+                self.end_headers()
+                return
+            body = self.rfile.read(length).decode('utf-8', errors='replace')
+            try:
+                msg = json.loads(body)
+            except Exception:
+                msg = None
+            if not isinstance(msg, dict) or 'detectIntervalSec' not in msg:
+                # 这条路径没有"把文本当消息说话"的语义（区别于 /push），
+                # 拿不准就当坏请求，别顺手改掉用户设好的值。
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b'{"error":"missing detectIntervalSec"}')
+                return
+            with settings_lock:
+                prev = settings['detectIntervalSec']
+                cur = clamp_detect_sec(msg.get('detectIntervalSec'))
+                settings['detectIntervalSec'] = cur
+                saved = save_settings(settings)
+            if cur != prev or not saved:
+                # 改周期是"会影响观感"的操作，日志里留一条，省得排查
+                # "为什么它突然变得这么爱说话"时无从下手。
+                log('[airi-settings] detect interval %ds -> %ds (saved=%s)'
+                    % (prev, cur, saved))
+            self._json_response(dict(settings_payload(), saved=saved))
         else:
             self.send_response(404)
             self.end_headers()
@@ -501,7 +630,8 @@ def main():
     card = live2d_assets.card_mode()
     log(f'[airi-live2d] character card {card}')
 
-    html = load_html(PORT, char_img, live2d=l2d_ok, silhouette=sil, card=card)
+    html = load_html(PORT, char_img, live2d=l2d_ok, silhouette=sil, card=card,
+                     detect_sec=settings['detectIntervalSec'])
     page_url, asset_port = start_asset_server(html)
     if page_url is None:
         log('[airi-standalone] ERROR: cannot start asset server, exit.')
@@ -604,4 +734,9 @@ def main():
 if __name__ == '__main__':
     _init_log()
     log('[airi-standalone] --- boot ---')
+    # 把"这一轮用的是哪个检测周期"写进日志头：用户改了周期之后，排查
+    # "为什么桌宠变得这么爱说话"只需要看这一行。
+    log('[airi-settings] detect interval = %ds (min=%d max=%d, file=%s)'
+        % (settings['detectIntervalSec'], DETECT_MIN_SEC, DETECT_MAX_SEC,
+           SETTINGS_PATH))
     main()

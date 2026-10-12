@@ -887,7 +887,8 @@ def find_character_image():
     return str(p) if p.is_file() else None
 
 
-def load_html(port, char_img=None, live2d=False, silhouette=False, card='square'):
+def load_html(port, char_img=None, live2d=False, silhouette=False, card='square',
+              detect_sec=30):
     """读取 ui.html，注入端口、立绘 file:// URI 和各个开关，返回最终 HTML 字符串。
 
     live2d 为 True 时才让页面去加载引擎；素材缺失时保持 False，
@@ -901,6 +902,11 @@ def load_html(port, char_img=None, live2d=False, silhouette=False, card='square'
     card 是角色底板模式（off/tight/square/frame/all），见 live2d_assets.card_mode()。
     默认与 card_mode() 保持一致 —— 两处默认值不一样的话，将来谁漏传一次 card，
     就会得到和界面其它地方不同的观感，很难查。
+
+    detect_sec 是右键菜单里「检测周期」的当前值（秒），只用于菜单首次渲染。
+    传默认值而不是留空：这个标记没被替换时页面会拿到字面量 '{{...}}'，
+    前端用 parseInt + isFinite 兜住（同 SILHOUETTE 的防御套路）。
+    真正的权威值仍在 Python 的 settings 里，菜单打开时会 GET /settings 复核。
     """
     html = (_SCRIPT_DIR / 'ui.html').read_text(encoding='utf-8')
     img_uri = Path(char_img).as_uri() if char_img else ''
@@ -909,6 +915,7 @@ def load_html(port, char_img=None, live2d=False, silhouette=False, card='square'
     html = html.replace('{{LIVE2D_ENABLED}}', 'true' if live2d else 'false')
     html = html.replace('{{SILHOUETTE}}', 'true' if silhouette else 'false')
     html = html.replace('{{CHAR_CARD}}', str(card or 'off'))
+    html = html.replace('{{DETECT_INTERVAL_SEC}}', str(int(detect_sec)))
     return html
 
 

@@ -588,6 +588,53 @@
       background: rgba(255,107,157,0.28);
     }
 
+    /* ===== 右键菜单 ·「检测周期」二级面板（v0.3.28） =====
+       两个视图共用同一个 #contextMenu 面板（见 HTML 里的注释：另起一个面板
+       会被窗口 region 裁掉）。所以这里的样式都跟在 .context-menu 下面。 */
+    .context-menu .menu-head {
+      padding: 0 12px 5px; font-size: 10.5px; color: #8b90a6;
+      letter-spacing: 0.02em;
+    }
+    .context-menu .menu-item.is-sub { display: flex; align-items: center; gap: 6px; }
+    .context-menu .menu-val {
+      margin-left: auto; color: #ff9ec2;
+      font-variant-numeric: tabular-nums;
+    }
+    .context-menu .menu-arrow { color: #8b90a6; font-size: 10px; }
+    .context-menu .menu-item.is-back {
+      color: #8b90a6; font-size: 11px; padding: 3px 12px 6px;
+    }
+    .context-menu .menu-stepper {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; padding: 3px 10px 6px;
+    }
+    .context-menu .step-btn {
+      width: 27px; height: 25px; line-height: 23px; text-align: center;
+      font-size: 14px; cursor: pointer; color: var(--text);
+      background: rgba(255,107,157,0.12);
+      border: 1px solid rgba(255,107,157,0.22); border-radius: 7px;
+      user-select: none; -webkit-user-select: none;
+      transition: background 0.15s;
+    }
+    .context-menu .step-btn:hover { background: rgba(255,107,157,0.26); }
+    .context-menu .step-btn:active { background: rgba(255,107,157,0.42); }
+    .context-menu .step-val {
+      font-size: 15px; font-weight: 600; color: #ff9ec2;
+      font-variant-numeric: tabular-nums;
+    }
+    .context-menu .menu-chips {
+      display: flex; flex-wrap: wrap; gap: 4px; padding: 0 10px 3px;
+    }
+    .context-menu .chip {
+      flex: 1 1 auto; min-width: 22px; text-align: center; padding: 3px 0;
+      font-size: 11px; cursor: pointer; border-radius: 6px;
+      color: var(--text); background: rgba(255,255,255,0.05);
+      user-select: none; -webkit-user-select: none;
+      transition: background 0.15s;
+    }
+    .context-menu .chip:hover { background: rgba(255,107,157,0.2); }
+    .context-menu .chip.active { background: rgba(255,107,157,0.38); color: #fff; }
+
     /* ===== 减弱动效偏好 ===== */
     @media (prefers-reduced-motion: reduce) {
       .character-box, .sparkle, .chibi-eye, .chibi-body,
@@ -651,9 +698,39 @@
     </div>
   </div>
 
-  <!-- 右键菜单 -->
-  <div class="context-menu" id="contextMenu">
-    <div class="menu-item" data-action="exit">退出 deepseek</div>
+  <!-- 右键菜单。
+       ⚠️ 两个视图（主菜单 / 检测周期）**必须共用这一个 #contextMenu 面板**：
+       collectUiRects() 只按这个 id 把菜单并进窗口 region（且要带 .show），
+       另起一个面板不在 region 里，会被裁成"看得见点不着"甚至整块不显示 ——
+       和 0.3.25 那条"相对路径打到资产服务器"是同一类"看不见的故障"。
+       视图用 hidden 切换，面板本身的 .show / 定位 / region 重推都不用变。 -->
+  <div class="context-menu" id="contextMenu" data-view="main">
+    <div class="menu-view" id="menuMain">
+      <div class="menu-item" data-action="exit">退出 deepseek</div>
+      <div class="menu-item is-sub" data-action="open-tick">
+        <span>检测周期</span>
+        <span class="menu-val" id="tickValue">30 秒</span>
+        <span class="menu-arrow">▸</span>
+      </div>
+    </div>
+    <div class="menu-view" id="menuTick" hidden>
+      <div class="menu-item is-back" data-action="back">‹ 检测周期</div>
+      <div class="menu-stepper">
+        <span class="step-btn" data-action="tick-dec">−</span>
+        <span class="step-val" id="tickStepVal">30 秒</span>
+        <span class="step-btn" data-action="tick-inc">+</span>
+      </div>
+      <div class="menu-chips" id="tickChips">
+        <span class="chip" data-action="tick-set" data-sec="1">1</span>
+        <span class="chip" data-action="tick-set" data-sec="2">2</span>
+        <span class="chip" data-action="tick-set" data-sec="5">5</span>
+        <span class="chip" data-action="tick-set" data-sec="10">10</span>
+        <span class="chip" data-action="tick-set" data-sec="15">15</span>
+        <span class="chip" data-action="tick-set" data-sec="30">30</span>
+        <span class="chip" data-action="tick-set" data-sec="60">60</span>
+      </div>
+      <div class="menu-head">秒 · 1~60 · 立即生效</div>
+    </div>
   </div>
 
   <script>
@@ -671,6 +748,24 @@
     }
     var SSE_URL = 'http://127.0.0.1:' + PORT + '/events';
     var EVENT_URL = 'http://127.0.0.1:' + PORT + '/event';
+    // 绝对地址（主服务器端口），理由同 EVENT_URL：页面是从**资产服务器**
+    // 的动态端口加载的，相对路径 '/settings' 会打到资产服务器上 → 404。
+    var SETTINGS_URL = 'http://127.0.0.1:' + PORT + '/settings';
+
+    // ============ 检测周期（右键菜单可改） ============
+    // 权威值在 Python 侧（standalone.settings，落盘 ~/.dsh/pets/）；
+    // 这里只是一份缓存：页面加载时先按 load_html 注入的初值渲染，
+    // 菜单打开时再 GET /settings 复核一次。
+    var detectSec = 30, detectMin = 1, detectMax = 60;
+    (function() {
+      // parseInt + isFinite 而不是裸插值：万一 DETECT_INTERVAL_SEC 这个模板
+      // 标记没被 load_html 替换掉，裸插值会让整段脚本语法错误、页面全挂；
+      // 这样写只会安静地退化成默认 30（同 SILHOUETTE 的防御套路）。
+      // 注：标记原文故意不在注释里出现 —— 它必须全文件只出现一次，
+      // live2d_probe/test_pet_settings.py 有这条断言。
+      var n = parseInt("{{DETECT_INTERVAL_SEC}}", 10);
+      if (isFinite(n) && n > 0) detectSec = n;
+    })();
 
     // ============ JS 黑匣子：任何前端错误都上报宿主日志 ============
     // 第六轮教训：用户报"点击没反应、也拖不动"时，前端到底活着没有完全不可知
@@ -1585,18 +1680,115 @@
     }
 
     // ============ 右键菜单 ============
-    petArea.addEventListener('contextmenu', function(e) {
-      e.preventDefault();
-      contextMenu.classList.add('show');
-      // 先定位再上报：贴边右键时把菜单收敛进窗口（留 4px 呼吸），
-      // 否则菜单溢出窗口被 OS 裁掉一截 —— region 只能包含窗口内的部分，
-      // 溢出那块永远显示不出来。visibility:hidden 不影响 offsetWidth 量取。
+    var menuAnchorX = 0, menuAnchorY = 0;
+
+    /** 把菜单收敛进窗口（留 4px 呼吸）。
+     *  溢出窗口的部分会被 OS 裁掉 —— region 只能包含窗口内的像素，溢出那块
+     *  永远显示不出来。visibility:hidden 不影响 offsetWidth 量取。 */
+    function positionMenu() {
       var mw = contextMenu.offsetWidth || 130;
       var mh = contextMenu.offsetHeight || 72;
-      var mx = Math.max(0, Math.min(e.clientX, window.innerWidth - mw - 4));
-      var my = Math.max(0, Math.min(e.clientY, window.innerHeight - mh - 4));
+      var mx = Math.max(0, Math.min(menuAnchorX, window.innerWidth - mw - 4));
+      var my = Math.max(0, Math.min(menuAnchorY, window.innerHeight - mh - 4));
       contextMenu.style.left = mx + 'px';
       contextMenu.style.top = my + 'px';
+    }
+
+    function repushMenuRegion() {
+      // 菜单弹出/换视图/收起都要重推窗口形状，否则那块不在 region 里。
+      // 立即推 + 60ms 后再确认一次：换视图时面板宽高立刻变了，
+      // 而 getBoundingClientRect 量的是最终盒子，所以这里不需要等过渡。
+      if (typeof pushSilhouette === 'function') pushSilhouette(true);
+      if (typeof pushSilhouette === 'function') setTimeout(function() { pushSilhouette(true); }, 60);
+    }
+
+    /** 切换菜单视图：main（主菜单）/ tick（检测周期二级面板）。
+     *  两个视图共用 #contextMenu 这个面板，靠 hidden 切换 —— 另起面板不在
+     *  collectUiRects() 的 region 里（它只认 #contextMenu 这个 id）。 */
+    function showMenuView(view) {
+      var main = document.getElementById('menuMain');
+      var tick = document.getElementById('menuTick');
+      if (!main || !tick) return;
+      var isTick = (view === 'tick');
+      main.hidden = isTick;
+      tick.hidden = !isTick;
+      contextMenu.setAttribute('data-view', isTick ? 'tick' : 'main');
+      if (isTick) renderDetectLabels();
+    }
+
+    function hideMenu() {
+      contextMenu.classList.remove('show');
+      if (typeof pushSilhouette === 'function') pushSilhouette(true);
+    }
+
+    // -------- 检测周期 --------
+    function clampDetect(sec) {
+      if (!isFinite(sec)) return detectSec;
+      return Math.max(detectMin, Math.min(detectMax, Math.round(sec)));
+    }
+
+    function renderDetectLabels() {
+      var txt = detectSec + ' 秒';
+      var v = document.getElementById('tickValue');
+      var s = document.getElementById('tickStepVal');
+      if (v) v.textContent = txt;
+      if (s) s.textContent = txt;
+      var chips = document.querySelectorAll('#tickChips .chip');
+      for (var i = 0; i < chips.length; i++) {
+        var sec = parseInt(chips[i].getAttribute('data-sec'), 10);
+        chips[i].classList.toggle('active', sec === detectSec);
+      }
+    }
+
+    /** 改周期：先本地渲染（点击要有立刻的反馈），再 POST 落盘。
+     *  真正生效的是扩展 —— 它 watch 这个设置文件，改完约 1 拍内切到新周期。 */
+    function setDetectSec(sec) {
+      var next = clampDetect(sec);
+      if (next === detectSec) return;
+      detectSec = next;
+      renderDetectLabels();
+      repushMenuRegion();      // 「1 秒」比「30 秒」窄，面板宽度变了就要重推 region
+      try {
+        fetch(SETTINGS_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ detectIntervalSec: detectSec })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (!d) return;
+          if (isFinite(d.min)) detectMin = d.min;
+          if (isFinite(d.max)) detectMax = d.max;
+          // 服务端才是权威（它夹过值）：不一致就对齐回来，别让界面说谎
+          if (isFinite(d.detectIntervalSec)) {
+            var v = clampDetect(d.detectIntervalSec);
+            if (v !== detectSec) { detectSec = v; renderDetectLabels(); repushMenuRegion(); }
+          }
+        }).catch(function() {});
+      } catch (err) {}
+    }
+
+    /** 打开菜单时用权威值复核一次缓存（页面里的值只是 load_html 注入的初值）。 */
+    function syncDetectSec() {
+      try {
+        fetch(SETTINGS_URL).then(function(r) { return r.json(); }).then(function(d) {
+          if (!d) return;
+          if (isFinite(d.min)) detectMin = d.min;
+          if (isFinite(d.max)) detectMax = d.max;
+          if (!isFinite(d.detectIntervalSec)) return;
+          var v = clampDetect(d.detectIntervalSec);
+          if (v !== detectSec) { detectSec = v; repushMenuRegion(); }
+          renderDetectLabels();
+        }).catch(function() {});
+      } catch (err) {}
+    }
+
+    petArea.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      showMenuView('main');        // 每次右键都从主菜单开始
+      renderDetectLabels();        // 先用缓存值渲染，别让标签空着等网络
+      contextMenu.classList.add('show');
+      menuAnchorX = e.clientX;
+      menuAnchorY = e.clientY;
+      positionMenu();
       // 菜单弹出后立刻重推窗口形状：否则菜单在 region 之外，被裁成"看不见的菜单"
       if (typeof pushSilhouette === 'function') pushSilhouette(true);
       // 过渡动画（180ms scale+translate）结束后再确认一次：上面的立即推送
@@ -1604,22 +1796,43 @@
       // 菜单边缘会被 region 短暂裁掉 —— 和气泡 popUp 是同一类问题（第十一轮）。
       // 周期轮询最迟 500ms 会纠正，但与其靠运气不如显式确认。
       if (typeof pushSilhouette === 'function') setTimeout(function() { pushSilhouette(true); }, 230);
+      syncDetectSec();
     });
     document.addEventListener('click', function() {
       if (!contextMenu.classList.contains('show')) return;
-      contextMenu.classList.remove('show');
-      // 收起也要重推：把菜单那块从形状里摘掉
-      if (typeof pushSilhouette === 'function') pushSilhouette(true);
+      hideMenu();
     });
     // 屏蔽 frameless 窗口里的浏览器默认右键菜单（头像区已有自定义菜单）
     document.addEventListener('contextmenu', function(e) { e.preventDefault(); });
     contextMenu.addEventListener('click', function(e) {
-      var a = e.target.getAttribute('data-action');
+      // 用 closest 而不是 e.target.getAttribute：二级菜单的条目里有 <span>
+      // 子节点（如「检测周期 ▸」的箭头），点到子节点时 target 不是带
+      // data-action 的那个元素，直接取会拿到 null → 整个菜单静默失效。
+      var el = (e.target && e.target.closest) ? e.target.closest('[data-action]') : null;
+      var a = el ? el.getAttribute('data-action') : null;
+
+      if (a === 'open-tick' || a === 'back') {
+        showMenuView(a === 'open-tick' ? 'tick' : 'main');
+        positionMenu();            // 换视图后面板尺寸变了，重新收敛进窗口
+        repushMenuRegion();
+        // 必须掐断冒泡：document 上的 click 监听会顺手把菜单关掉
+        // （换视图/连点步进时菜单得留着）
+        e.stopPropagation();
+        return;
+      }
+      if (a === 'tick-dec' || a === 'tick-inc' || a === 'tick-set') {
+        if (a === 'tick-dec') { setDetectSec(detectSec - 1); }
+        else if (a === 'tick-inc') { setDetectSec(detectSec + 1); }
+        else { setDetectSec(parseInt(el.getAttribute('data-sec'), 10)); }
+        e.stopPropagation();       // 同上：连续调值时菜单不能被关掉
+        return;
+      }
+
+      // 其余（含 exit）都是"点完就收起"
       if (a === 'exit') {
         try { if (window.pywebview && window.pywebview.api) window.pywebview.api.exit_app(); } catch (err) {}
       }
-      contextMenu.classList.remove('show');
-      if (typeof pushSilhouette === 'function') pushSilhouette(true);
+      hideMenu();
     });
 
     // ============ 气泡自动消失 ============
