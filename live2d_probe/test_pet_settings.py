@@ -314,6 +314,43 @@ if exists_before and exists_after:
 check('真实设置文件未被本次测试创建/修改', same,
       'real=%s exists %s -> %s' % (REAL, exists_before, exists_after))
 
+# ===========================================================================
+out('')
+out('=' * 74)
+out('F. 两端算出来的设置路径是同一个（整个功能的命门）')
+out('=' * 74)
+# 这个功能的链路是「桌宠写文件 → 扩展 watch 同一个文件」。两端路径只要不一致，
+# 表现就是"菜单点得动、值也落盘了、日志也打了"，但扩展永远读不到 —— 静默失效，
+# 且没有任何报错。所以这条必须实测两端**各自算出来的绝对路径**，
+# 而不是去 grep 源码里有没有那个文件名（那种断言在有人改了目录时会照过）。
+sys.path.insert(0, HERE)
+import node_finder  # noqa: E402
+
+node = node_finder.find_node()
+if not node:
+    check('找到 node（用来算扩展侧路径）', False, 'node_finder.find_node() 返回空')
+else:
+    CHECK = ("const os=require('os'),path=require('path');"
+             "console.log(path.join(os.homedir(),'.dsh','pets','airi-pet-settings.json'))")
+    r = subprocess.run([node, '-e', CHECK], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', timeout=60)
+    ext_path = (r.stdout or '').strip()
+    # Python 侧：把 AIRI_PET_SETTINGS 摘掉，问 standalone 自己算出来的默认路径
+    env = os.environ.copy()
+    env.pop('AIRI_PET_SETTINGS', None)
+    env['AIRI_PET_LOG'] = os.path.join(tempfile.gettempdir(), 'airi_test_pet_settings.log')
+    r2 = subprocess.run(
+        [sys.executable, '-c',
+         'import sys; sys.path.insert(0, %r); import standalone; '
+         'print(standalone.SETTINGS_PATH)' % PET_ROOT],
+        env=env, capture_output=True, text=True, encoding='utf-8',
+        errors='replace', timeout=60)
+    py_path = (r2.stdout or '').strip().splitlines()[-1] if (r2.stdout or '').strip() else ''
+    norm = lambda s: os.path.normcase(os.path.normpath(s))
+    check('扩展与桌宠算出的设置路径完全一致',
+          ext_path != '' and py_path != '' and norm(ext_path) == norm(py_path),
+          'ext=%r py=%r' % (ext_path, py_path))
+
 out('')
 out('RESULT: %s (%d failures)' % ('ALL PASS' if fail == 0 else 'FAILED', fail))
 io.open(OUT, 'w', encoding='utf-8').write('\n'.join(_lines) + '\n')
