@@ -712,6 +712,7 @@
         <span class="menu-val" id="tickValue">30 秒</span>
         <span class="menu-arrow">▸</span>
       </div>
+      <div class="menu-item" data-action="edit-corpus">编辑语料（台词库）</div>
     </div>
     <div class="menu-view" id="menuTick" hidden>
       <div class="menu-item is-back" data-action="back">‹ 检测周期</div>
@@ -1829,6 +1830,18 @@
       }
 
       // 其余（含 exit）都是"点完就收起"
+      if (a === 'edit-corpus') {
+        // 只发请求，不在这里冒泡说话 —— 真正打开成功/失败由 Python 那边
+        // 决定（它要等扩展回执、还可能回落），由它推**唯一一条**结果气泡。
+        // 这里先说一句就是两条气泡同时冒（MAX_BUBBLES=2）。
+        try {
+          fetch(SETTINGS_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ openCorpus: true })
+          }).then(function(r) { return r.json(); }).catch(function() {});
+        } catch (err) {}
+      }
       if (a === 'exit') {
         try { if (window.pywebview && window.pywebview.api) window.pywebview.api.exit_app(); } catch (err) {}
       }
