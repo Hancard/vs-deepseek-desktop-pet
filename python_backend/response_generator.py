@@ -23,12 +23,8 @@ import os
 import random
 import json
 from typing import Optional
-from corpus import (
-    SYNTAX_ERROR, TYPE_ERROR, IMPORT_ERROR, NAME_ERROR,
-    MANY_ERRORS, ALL_CLEAR, GREETING, IDLE, ENCOURAGE,
-    FILE_SCAN, FILE_REMIND, FILE_CLEAR,
-    get_emotion,
-)
+import corpus
+from corpus import get_emotion
 
 
 def classify_error_category(message: str, source: str = "") -> str:
@@ -81,24 +77,18 @@ def categorize_errors(errors: list) -> str:
 
 
 def pick_corpus(category: str, variables: dict = None) -> str:
-    """从语料库中随机选取一条台词，并替换变量占位符"""
-    corpus_map = {
-        "syntax_error": SYNTAX_ERROR,
-        "type_error": TYPE_ERROR,
-        "import_error": IMPORT_ERROR,
-        "name_error": NAME_ERROR,
-        "many_errors": MANY_ERRORS,
-        "all_clear": ALL_CLEAR,
-        "greeting": GREETING,
-        "idle": IDLE,
-        "encourage": ENCOURAGE,
-        "file_scan": FILE_SCAN,
-        "file_remind": FILE_REMIND,
-        "file_clear": FILE_CLEAR,
-    }
+    """从语料库中随机选取一条台词，并替换变量占位符
 
-    lines = corpus_map.get(category, ENCOURAGE)
-    text = random.choice(lines)
+    台词来源由 corpus.get_lines() 决定：**用户语料优先，缺失/写坏回落内置**
+    （右键菜单「编辑语料」可改，见 corpus.py 文件头）。这里不再直接引用那些
+    模块级列表常量 —— 它们只是"出厂默认值"，会被用户语料逐场景覆盖。
+
+    为什么不能在 import 期把列表绑进来：corpus 支持热重载（用户改完保存立刻
+    生效），`from corpus import FILE_SCAN` 绑的是**当初那个 list 对象**，用户
+    改完文件这边还指着旧的，表现成"我改了怎么没生效"。
+    """
+    lines = corpus.get_lines(category)
+    text = random.choice(lines or corpus.ENCOURAGE)
 
     if variables:
         for key, value in variables.items():
