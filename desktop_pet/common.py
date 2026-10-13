@@ -847,6 +847,12 @@ def _apply_window_region(window, rects, vw, vh):
 
         meta['kept'] = kept
         if not kept:
+            # ⚠️ 此刻 h_total 还没交给系统（SetWindowRgn 没被调到），必须自己删。
+            #    漏掉它 = 每调用一次泄漏一个 GDI 区域句柄；region 是 500ms 一拍
+            #    推上来的，进程 GDI 句柄（默认上限 10000）耗尽后 CreateRectRgn
+            #    会开始失败 ——"异形窗口"这个功能就永久坏掉（v0.3.31 补；
+            #    下面 SetWindowRgn 失败的分支一直是删了的，只有这条漏了）。
+            gdi32.DeleteObject(h_total)
             return {'ok': False, 'why': 'all rects clipped away', 'meta': meta}
 
         # SetWindowRgn 成功后 region 归系统所有，不能再 DeleteObject
