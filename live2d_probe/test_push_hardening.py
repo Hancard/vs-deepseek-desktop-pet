@@ -164,6 +164,109 @@ out('[%s] event-binary-body status=%r resp=%r' % ('PASS' if ok else 'FAIL', st, 
 if not ok:
     fail += 1
 
+# ---------- 2.7 /event 的入参类型加固（v0.3.31）----------
+# `/event` 与 `/push` 是**同一个坑的两个入口**：payload 是外部写的，而这里
+# 以前写的是
+#     p = msg.get('payload') or {}
+# —— 只兜 falsy。`payload=5`（真值非 dict）会在 p.get 上抛 AttributeError，
+# 被外层 except 记成 "/event parse failed"，把一条**良性**的畸形输入伪装成
+# 解析错误（0.3.26 那条"来路不明的 parse 失败"假线索就是这么来的）。
+# /push 侧早就有 isinstance 守卫（见 2.5），这次是补 /event 侧。
+#
+# 第二处：corpusOpened 的 seq 走 int() 收敛，而 Python 的 json **默认接受**
+# 字面量 Infinity —— int(float('inf')) 抛 OverflowError，与 _as_seq /
+# clamp_detect_sec 同源。三处 int() 收敛点必须都兜 OverflowError。
+#
+# 断言方式：这批输入全是**合法 JSON**，所以它们一个都不该产生
+# "/event parse failed" —— 那条日志只该留给真正无法解析的 body（如 2.6）。
+_LOG_PATH = standalone.LOG_PATH
+
+
+def parse_failed_count():
+    """数日志里 /event parse failed 的行数；日志还没建时算 0（不是 -1）。
+
+    ⚠️ 返回 -1 会让**第一条**用例永远假失败（上一轮踩过）。
+    """
+    try:
+        with io.open(_LOG_PATH, encoding='utf-8') as fh:
+            return sum(1 for ln in fh if '/event parse failed' in ln)
+    except OSError:
+        return 0
+
+
+def log_tail(n=8):
+    try:
+        with io.open(_LOG_PATH, encoding='utf-8') as fh:
+            return [ln.rstrip() for ln in fh.readlines()][-n:]
+    except OSError:
+        return []
+
+
+_before_pf = parse_failed_count()
+
+event_cases = [
+    ('event-bridgepayload-int', {'type': 'bridgePing', 'payload': 5}),
+    ('event-bridgepayload-null', {'type': 'bridgePing', 'payload': None}),
+    ('event-bridgepayload-str', {'type': 'bridgePing', 'payload': 'ok'}),
+    ('event-bridgepayload-bool', {'type': 'bridgePing', 'payload': True}),
+    ('event-bridgepayload-list', {'type': 'bridgePing', 'payload': ['ok']}),
+    ('event-corpuspayload-int', {'type': 'corpusOpened', 'payload': 5}),
+    ('event-corpuspayload-null', {'type': 'corpusOpened', 'payload': None}),
+    ('event-corpus-seq-str', {'type': 'corpusOpened', 'payload': {'seq': 'abc'}}),
+    ('event-corpus-seq-null', {'type': 'corpusOpened', 'payload': {'seq': None}}),
+    ('event-top-int', 5),
+    ('event-top-str', 'hello'),
+    ('event-top-list', [1, 2, 3]),
+    ('event-normal-bridge',
+     {'type': 'bridgePing', 'payload': {'ok': True, 'at': 1, 'pid': 2}}),
+]
+for name, payload in event_cases:
+    st, resp = post('/event', payload)
+    ok = (st == 200 and resp == {'status': 'ok'})
+    out('[%s] %s status=%r resp=%r' % ('PASS' if ok else 'FAIL', name, st, resp))
+    if not ok:
+        fail += 1
+
+# Infinity / NaN 只在字面量形式下出现 —— 手工给字节，不绕 json.dumps
+for name, raw in [
+    ('event-corpus-seq-inf',
+     b'{"type":"corpusOpened","payload":{"seq":Infinity,"ok":true}}'),
+    ('event-top-inf', b'Infinity'),
+]:
+    st, resp = post('/event', raw)
+    ok = (st == 200 and resp == {'status': 'ok'})
+    out('[%s] %s status=%r resp=%r' % ('PASS' if ok else 'FAIL', name, st, resp))
+    if not ok:
+        fail += 1
+
+time.sleep(0.3)
+_after_pf = parse_failed_count()
+ok = (_after_pf == _before_pf)
+out('[%s] 合法 JSON 的畸形 /event 不产生 "parse failed" 假线索 (%d -> %d)'
+    % ('PASS' if ok else 'FAIL', _before_pf, _after_pf))
+if not ok:
+    fail += 1
+    for ln in log_tail(12):
+        out('    log: %s' % ln)
+
+_tail = '\n'.join(log_tail(40))
+m_ignored = 'ignored non-object body' in _tail
+out('[%s] 顶层非对象留痕 "/event ignored non-object body"（不静默、不误报）'
+    % ('PASS' if m_ignored else 'FAIL'))
+if not m_ignored:
+    fail += 1
+
+m_late = 'late ack for seq=' in _tail
+out('[%s] corpusOpened 的坏 seq 走"迟到回执"分支而非崩（含 Infinity）'
+    % ('PASS' if m_late else 'FAIL'))
+if not m_late:
+    fail += 1
+
+m_ping = 'bridge ping OK' in _tail
+out('[%s] bridgePing 正常 payload 仍被正确解析' % ('PASS' if m_ping else 'FAIL'))
+if not m_ping:
+    fail += 1
+
 # ---------- 3. 正常路径不受影响 ----------
 st, resp = post('/push', {'type': 'chatMessage',
                           'payload': {'text': '正常消息', 'emotion': 'happy'}})
