@@ -200,11 +200,29 @@ _corpus_open_lock = threading.Lock()
 _corpus_open_wait = {}
 
 
+def _as_dict(value):
+    """把外部 JSON 里的 payload 收敛成 dict。
+
+    /event 的各个分支只按 dict 消费（`.get`），而 payload 是**外部写的**：
+    null / 数字 / 字符串 / 数组都能通过 json.loads。以前写的是
+    `msg.get('payload') or {}` —— 那只兜得住 falsy 值，`payload=5` 这种
+    真值非 dict 会在 `.get` 上抛 AttributeError，再被外层 except 记成
+    "/event parse failed"，把一条良性的畸形输入伪装成解析错误
+    （v0.3.31；/push 侧早就有 `isinstance(p, dict)` 守卫，见那里的注释——
+    这是同一个坑的第二个入口）。
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def _corpus_open_ack(seq, ok, method):
     """扩展回执入口（/event 的 corpusOpened 分支调）。@returns 是否有人等着它"""
     try:
         seq = int(seq)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # ⚠️ OverflowError 必须一起兜：Python 的 json **默认接受**字面量
+        #    Infinity，`int(float('inf'))` 抛的正是它 —— 与 _as_seq /
+        #    clamp_detect_sec 同源的老坑，这里是第三个用 int() 的地方
+        #    （v0.3.31 补）。
         return False
     with _corpus_open_lock:
         slot = _corpus_open_wait.get(seq)
@@ -648,13 +666,19 @@ class AiriHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length).decode('utf-8', errors='replace')
             try:
                 msg = json.loads(body)
-                kind = msg.get('type')
-                if kind == 'desktopReady':
+                # 顶层不是对象时 msg.get 会 AttributeError → 被下面的 except
+                # 记成 "parse failed"（v0.3.31）。/event 只收对象，直接忽略。
+                kind = msg.get('type') if isinstance(msg, dict) else None
+                if kind is None:
+                    log('[airi-standalone] /event ignored non-object body: %s'
+                        % type(msg).__name__)
+                elif kind == 'desktopReady':
                     # 这行以前是 print —— 扩展用 stdio:'ignore' 起进程，print 全被丢掉，
                     # 于是"页面到底连上没有"在 .airi-pet.log 里毫无痕迹。必须走 log()。
                     log('[airi-standalone] Desktop pet connected')
                 elif kind == 'silhouetteDiag':
                     # 前端上报的轮廓诊断：桥/尺寸/alpha 读数是否可信，全靠这条
+                    # （这一条只 dump，不 .get，所以 payload 是什么形状都收得下）
                     p = msg.get('payload') or {}
                     log('[airi-sil] %s' % json.dumps(p, ensure_ascii=False))
                 elif kind == 'jsError':
@@ -664,7 +688,7 @@ class AiriHandler(BaseHTTPRequestHandler):
                     p = msg.get('payload') or {}
                     log('[airi-js] ERROR %s' % json.dumps(p, ensure_ascii=False))
                 elif kind == 'bridgePing':
-                    p = msg.get('payload') or {}
+                    p = _as_dict(msg.get('payload'))
                     if p.get('ok'):
                         log('[airi-js] bridge ping OK (at=%s pid=%s)'
                             % (p.get('at'), p.get('pid')))
@@ -676,7 +700,7 @@ class AiriHandler(BaseHTTPRequestHandler):
                     # 是扩展告诉我们"这次打开我接单了 / 我失败了" ——
                     # 收到就唤醒 _open_corpus_worker，让它别再走 code 命令回落
                     # （否则会在扩展已经打开的情况下再拉起一个 VS Code）。
-                    p = msg.get('payload') or {}
+                    p = _as_dict(msg.get('payload'))
                     seq = p.get('seq')
                     handled = _corpus_open_ack(seq, p.get('ok'), p.get('method'))
                     if not handled:
