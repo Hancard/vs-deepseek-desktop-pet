@@ -22,6 +22,8 @@ live2d_assets.py — Live2D 素材定位、校验与 Cubism Core 获取
 -------
     AIRI_LIVE2D=0        强制退回图片 / CSS 角色（做 A/B 对照用）
     AIRI_CUBISM_CORE     指定已有的 core 文件路径，跳过下载
+                         （会**复制**到落点：core 只能由本模块的静态服务器
+                          提供，别处的副本页面取不到）
 """
 
 import json
@@ -90,14 +92,51 @@ def card_mode() -> str:
     return v if v in CARD_MODES else 'square'
 
 
+def _cache_core_from(src: Path, dst: Path) -> bool:
+    """把别处的一份合法 core 复制到落点。@returns 是否成功。
+
+    ⚠️ 为什么是"复制"而不是"就地使用"：core 只能由本模块的静态服务器
+    提供给页面，而那个服务器只服务 VENDOR_DIR（见 common._AssetHandler
+    的 /vendor/ 分支），页面里更是写死了 /vendor/live2dcubismcore.min.js。
+    所以任何"放在别处的 core"都必须真的落到落点上才算可用 ——
+    光返回 True 是**谎报成功**，v0.3.31 实测的后果见 ensure_core 的注释。
+    """
+    try:
+        if src.resolve() == dst.resolve():
+            return True                 # 本来就是落点
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes())
+    except OSError as exc:
+        print(f'[airi-live2d] cannot cache cubism core from {src}: {exc!r}')
+        return False
+    print(f'[airi-live2d] cubism core copied from {src}')
+    return True
+
+
 def ensure_core(path: Path = CORE_PATH, timeout: int = 30) -> bool:
     """本地已有就直接用；否则从官方 CDN 取一份缓存到本地。
 
     失败不抛异常 —— 调用方据此退回图片角色。返回是否可用。
+
+    ⚠️ "可用"的定义是 **path 上有一份合法的 core**，不是"我手上有一份"。
+    v0.3.31 修：AIRI_CUBISM_CORE 这条分支以前直接 `return True`（文件还在
+    用户自己指定的地方），而调用方 check_assets() 紧接着 stat 这个落点 →
+    FileNotFoundError 在**开窗之前**把桌宠整个打死（扩展用 stdio:'ignore'
+    起进程，用户侧零痕迹）。而且就算没崩，页面也永远拿不到那份 core。
+    全新克隆必现：这个 core 文件在 .gitignore 里，仓库里本来就没有。
     """
     env_core = os.environ.get('AIRI_CUBISM_CORE', '').strip()
-    if env_core and Path(env_core).is_file() and Path(env_core).stat().st_size >= MIN_CORE_BYTES:
-        return True
+    if env_core:
+        src = Path(env_core)
+        if _core_ok(src):
+            # 落点已经有可用的就不必再复制；否则把它搬到位（这就是"跳过下载"）
+            if _core_ok(path) or _cache_core_from(src, path):
+                return True
+        elif src.is_file():
+            print(f'[airi-live2d] AIRI_CUBISM_CORE too small '
+                  f'(< {MIN_CORE_BYTES} bytes): {env_core}')
+        else:
+            print(f'[airi-live2d] AIRI_CUBISM_CORE not found: {env_core}')
 
     if _core_ok(path):
         return True
@@ -114,12 +153,9 @@ def ensure_core(path: Path = CORE_PATH, timeout: int = 30) -> bool:
         Path.home() / '.dsh' / 'pets' / 'live2dcubismcore.min.js',
     ):
         if _core_ok(candidate):
-            try:
-                path.write_bytes(candidate.read_bytes())
-                print(f'[airi-live2d] cubism core reused from {candidate}')
+            if _cache_core_from(candidate, path):
                 return True
-            except OSError:
-                break
+            break               # 复制失败多半是文件系统的问题，换个源也一样
 
     try:
         req = urllib.request.Request(CORE_URL, headers={
@@ -180,7 +216,26 @@ def _closure_refs(data: dict):
 
 
 def check_assets() -> tuple:
-    """启动时的素材自检。返回 (是否可用, 说明行列表)。"""
+    """启动时的素材自检。返回 (是否可用, 说明行列表)。
+
+    ⚠️ 契约：**永不抛异常**（v0.3.31 明确化）。它只是一次"能不能上 Live2D"
+    的自检，失败的正确后果是退回图片 / CSS 角色 —— 而不是让桌宠起不来。
+    两个入口（standalone.main / main.main）都是**裸调用**，而扩展是用
+    stdio:'ignore' 起桌宠的：这里抛出去的异常在用户侧完全不可见（没有窗口、
+    没有报错、日志里连一行都没有），表现成"点了启动，什么都没发生"。
+        v0.3.31 实测的原始崩法：AIRI_CUBISM_CORE 指向一份合法的 core 时，
+    ensure_core 返回 True 但没把文件放到落点，紧接着的 CORE_PATH.stat()
+    抛 FileNotFoundError，一路逃出 main()。
+    """
+    try:
+        return _check_assets()
+    except Exception as exc:
+        return False, ['asset check raised %s: %r -> fall back to image character'
+                       % (type(exc).__name__, exc)]
+
+
+def _check_assets() -> tuple:
+    """check_assets 的实现体（可能抛；只应由上面那个包装调用）。"""
     lines = []
 
     if not enabled():
@@ -213,7 +268,16 @@ def check_assets() -> tuple:
         lines.append('cubism core unavailable -> fall back to image character')
         return False, lines
 
-    lines.append(f'cubism core {CORE_PATH.stat().st_size} bytes')
+    # ensure_core 已经声明"落点上有可用的 core"，这里再核一遍：它的契约是
+    # "返回是否可用"，而"可用"就是"能把字节数读出来"。两者一旦分家
+    # （v0.3.31 就是这么炸的），宁可降级成图片角色，也不要抛。
+    try:
+        core_bytes = CORE_PATH.stat().st_size
+    except OSError as exc:
+        lines.append('cubism core missing at %s (%r) -> fall back to image character'
+                     % (CORE_PATH, exc))
+        return False, lines
+    lines.append(f'cubism core {core_bytes} bytes')
     return True, lines
 
 
