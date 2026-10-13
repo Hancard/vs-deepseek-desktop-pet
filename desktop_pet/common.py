@@ -941,12 +941,22 @@ _MIME = {
 
 
 def _safe_join(base: Path, url_path: str):
-    """把 URL 路径安全映射到 base 之下；越界（含 `..`、绝对路径）返回 None。"""
-    rel = urllib.parse.unquote(url_path)
-    rel = rel.replace('\\', '/').lstrip('/')
-    if not rel:
+    """把 URL 路径安全映射到 base 之下；越界（含 `..`、绝对路径）返回 None。
+
+    ⚠️ resolve() 遇到畸形路径抛的是 **ValueError**（内嵌 NUL）或 OSError，
+    不是"越界"那种 ValueError(relative_to)。不兜的话，一个
+    `GET /vendor/%00` 就能让请求**直接断连**（客户端 RemoteDisconnected、
+    宿主控制台吐一段 traceback）—— v0.3.31 实测。畸形路径必须与越界
+    走同一条路（403），不能炸穿请求。
+    """
+    try:
+        rel = urllib.parse.unquote(url_path)
+        rel = rel.replace('\\', '/').lstrip('/')
+        if not rel:
+            return None
+        target = (base / rel).resolve()
+    except (ValueError, OSError):
         return None
-    target = (base / rel).resolve()
     try:
         target.relative_to(base.resolve())
     except ValueError:
@@ -980,67 +990,86 @@ def _make_handler(html_text: str):
                 return
             super().handle_error(request, client_address)
 
-        def do_GET(self):
-            path = urllib.parse.urlparse(self.path).path
+        def _dispatch(self, path: str, body=True):
+            """按**白名单**解析路径并应答。do_GET / do_HEAD 共用同一份路由。
 
+            ⚠️ 两者必须共用（v0.3.31）：只覆写 do_GET 的话，HEAD 会落到
+            SimpleHTTPRequestHandler.do_HEAD → send_head() → translate_path()，
+            而它的根基 `self.directory` 从来没被指定过 = **进程 CWD**
+            （扩展拉起桌宠时 cwd = desktop_pet/）。实测：
+                HEAD /common.py      → 200 Content-Length=48284
+                HEAD /standalone.py  → 200 Content-Length=49027
+            整个白名单被绕过，源码树的存在性与字节数全暴露。页面从来不发
+            HEAD（页面本体与模型都用 GET），这条路纯属攻击面。
+            """
             if path in ('/', '/index.html', '/ui.html'):
-                return self._blob(page, 'text/html; charset=utf-8')
+                return self._blob(page, 'text/html; charset=utf-8', body)
 
             if path == '/favicon.ico':
-                return self._plain(204, b'')
+                return self._plain(204, b'', body)
 
-            # 引擎 js 与 core
-            if path.startswith('/vendor/'):
-                target = _safe_join(VENDOR_DIR, path[len('/vendor/'):])
-                if target is None:
-                    return self._plain(403, b'forbidden path')
-                if not target.is_file():
-                    return self._plain(404, b'not found: ' + path.encode('utf-8'))
-                return self._file(target)
+            # 引擎 js 与 core（/vendor/）、Live2D 模型闭包（/pet-assets/）
+            for prefix, base in (('/vendor/', VENDOR_DIR),
+                                 ('/pet-assets/', MODEL_ROOT)):
+                if path.startswith(prefix):
+                    target = _safe_join(base, path[len(prefix):])
+                    if target is None:
+                        return self._plain(403, b'forbidden path', body)
+                    if not target.is_file():
+                        return self._plain(
+                            404, b'not found: ' + path.encode('utf-8'), body)
+                    return self._file(target, body)
 
-            # Live2D 模型闭包
-            if path.startswith('/pet-assets/'):
-                target = _safe_join(MODEL_ROOT, path[len('/pet-assets/'):])
-                if target is None:
-                    return self._plain(403, b'forbidden path')
-                if not target.is_file():
-                    return self._plain(404, b'not found: ' + path.encode('utf-8'))
-                return self._file(target)
+            return self._plain(404, b'not found: ' + path.encode('utf-8'), body)
 
-            return self._plain(404, b'not found: ' + path.encode('utf-8'))
+        def do_GET(self):
+            return self._dispatch(urllib.parse.urlparse(self.path).path, True)
 
-        def _file(self, target: Path):
+        def do_HEAD(self):
+            # 只发头、不发 body（其余路由与 do_GET 完全一致）
+            return self._dispatch(urllib.parse.urlparse(self.path).path, False)
+
+        def _file(self, target: Path, body=True):
+            ctype = _MIME.get(target.suffix.lower(), 'application/octet-stream')
+            if not body:
+                # HEAD 只报大小，不读盘 —— 模型 js / core 都是几百 KB，
+                # 读出来只为丢掉不值当
+                try:
+                    return self._respond(200, ctype, target.stat().st_size,
+                                         None, False)
+                except OSError:
+                    return self._plain(404, b'unreadable', False)
             try:
                 blob = target.read_bytes()
             except OSError:
                 return self._plain(404, b'unreadable')
-            ctype = _MIME.get(target.suffix.lower(), 'application/octet-stream')
             return self._blob(blob, ctype)
 
-        def _blob(self, blob: bytes, ctype: str):
-            self.send_response(200)
-            self.send_header('Content-Type', ctype)
-            self.send_header('Content-Length', str(len(blob)))
-            # 桌宠每次启动都重读本地文件，别让 WebView2 缓存住旧模型
-            self.send_header('Cache-Control', 'no-store')
-            self.end_headers()
-            try:
-                self.wfile.write(blob)
-            except Exception:
-                pass
-
-        def _plain(self, code: int, blob: bytes):
+        def _respond(self, code: int, ctype: str, length: int,
+                     chunk: bytes = None, body=True):
+            """统一的应答出口。body=False 就是 HEAD：发完头就不发 body。"""
             try:
                 self.send_response(code)
+                if ctype:
+                    self.send_header('Content-Type', ctype)
                 # HTTP/1.1 keep-alive 必须有准确的 Content-Length；
                 # 204/304 按定义没有 body，不能带
                 if code not in (204, 304):
-                    self.send_header('Content-Length', str(len(blob)))
+                    self.send_header('Content-Length', str(length))
+                if code == 200:
+                    # 桌宠每次启动都重读本地文件，别让 WebView2 缓存住旧模型
+                    self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
-                if blob:
-                    self.wfile.write(blob)
+                if body and chunk:
+                    self.wfile.write(chunk)
             except Exception:
                 pass
+
+        def _blob(self, blob: bytes, ctype: str, body=True):
+            self._respond(200, ctype, len(blob), blob, body)
+
+        def _plain(self, code: int, blob: bytes, body=True):
+            self._respond(code, '', len(blob), blob, body)
 
     return _AssetHandler
 
