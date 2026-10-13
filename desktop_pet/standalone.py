@@ -222,15 +222,24 @@ def _launch_code_cli(path):
            or shutil.which('code-insiders') or shutil.which('code-insiders.cmd'))
     if not exe:
         return None
+    # ⚠️ `code` 在 Windows 上是 .cmd 批处理，CreateProcess 不能直接执行它，
+    #    必须经 cmd.exe —— 所以这里只能 shell=True。
+    #
+    # ⚠️⚠️ exe 的路径**必须带引号**（v0.3.30 修）：本机
+    #    shutil.which('code') 返回的是 `S:\Microsoft VS Code\bin\code.CMD`
+    #    —— **含空格**。旧写法只给参数加引号、exe 裸拼，交给 cmd.exe 后它
+    #    拿 `S:\Microsoft` 当命令名 → 命令找不到；而 Popen 本身不抛错
+    #    （stderr 早已丢进 DEVNULL），于是这里**谎报成功**：日志写
+    #    "opened via code CLI"、气泡说"台词库打开了"，实际什么都没打开；
+    #    并且因为返回了非 None，第三级 os.startfile 永远轮不到 ——
+    #    三级回落静默退化成两级。
+    #    用 list2cmdline 而不是手写 '"%s" "%s"'：它会连参数内部的引号一起处理。
+    cmd = subprocess.list2cmdline([exe, path])
     try:
-        # ⚠️ `code` 在 Windows 上是 .cmd 批处理。CreateProcess 不能直接执行
-        #    .cmd，必须经 cmd.exe —— 而 cmd.exe 的 /c 需要用 shell 语义拼串。
-        #    这里用 subprocess 的 list 形式 + shell=True：list 形式会保留参数
-        #    边界（路径含空格也不怕），shell=True 才让 .cmd 跑得起来。
         kwargs = {}
         if os.name == 'nt':
             kwargs['creationflags'] = 0x00000008 | 0x08000000  # DETACHED|NO_WINDOW
-        subprocess.Popen('%s "%s"' % (exe, path), shell=True,
+        subprocess.Popen(cmd, shell=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          stdin=subprocess.DEVNULL, **kwargs)
         return 'code-cli'
@@ -252,8 +261,23 @@ def _open_corpus_fallback(path):
     return None
 
 
-def _open_corpus_worker(seq):
-    """后台线程：确保文件存在 → 等扩展回执 → 没等到就逐级回落 → 说一句结果。"""
+def _corpus_release(seq, slot):
+    """摘掉自己的等待槽。
+
+    只摘"还是我这一个"的时候：并发/迟到回执的情况下别误摘别人的槽
+    （序号在一个进程内单调递增，正常不会撞，但显式判一下更安全）。"""
+    with _corpus_open_lock:
+        if _corpus_open_wait.get(seq) is slot:
+            _corpus_open_wait.pop(seq, None)
+
+
+def _open_corpus_worker(seq, slot=None):
+    """后台线程：确保文件存在 → 等扩展回执 → 没等到就逐级回落 → 说一句结果。
+
+    slot 允许由 /settings 处理器**预先登记好**再传进来（顺序理由见那里：
+    登记必须早于"落盘发布"）。传 None 时本函数自己登记 —— 直接调用它的
+    测试/脚本走这条路。
+    """
     path = None
     try:
         if corpus is None:
@@ -261,17 +285,21 @@ def _open_corpus_worker(seq):
         path = corpus.ensure_corpus_file()
     except Exception as exc:
         log('[airi-corpus] ensure failed: %r' % (exc,))
+        # ⚠️ 槽可能是调用方预先登记好的 —— 这条路径提前返回，必须自己摘干净，
+        #    否则它会一直挂在 _corpus_open_wait 里（测试的 drain() 也会一直等）
+        if slot is not None:
+            _corpus_release(seq, slot)
         push_message('errorAlert', '唔…台词库文件没生成出来，我看下日志再说。', 'angry')
         return
 
-    slot = {'event': threading.Event(), 'ok': False, 'method': None}
-    with _corpus_open_lock:
-        _corpus_open_wait[seq] = slot
+    if slot is None:
+        slot = {'event': threading.Event(), 'ok': False, 'method': None}
+        with _corpus_open_lock:
+            _corpus_open_wait[seq] = slot
     try:
         got = slot['event'].wait(CORPUS_OPEN_ACK_TIMEOUT)
     finally:
-        with _corpus_open_lock:
-            _corpus_open_wait.pop(seq, None)
+        _corpus_release(seq, slot)
 
     if got and slot['ok']:
         log('[airi-corpus] opened in VS Code (seq=%d, by=%s)'
@@ -684,12 +712,23 @@ class AiriHandler(BaseHTTPRequestHandler):
                 # 变了就会打开语料文件并回执。真正的打开动作在后台线程里做，
                 # 因为要等回执（最多 CORPUS_OPEN_ACK_TIMEOUT 秒），
                 # 不能在 HTTP 线程里阻塞前端。
+                #
+                # ⚠️ 顺序（v0.3.30 修）：**先登记等待槽，再落盘**。
+                #    落盘 = 把这个请求"发布"给扩展，而扩展的 fs.watchFile 是
+                #    500ms 轮询，它可能在下一拍立刻回执。旧写法先落盘、由后台
+                #    线程稍后再登记，于是存在这个窗口：回执先到 →
+                #    _corpus_open_ack 找不到槽 → 当成"迟到回执"丢掉 →
+                #    worker 白等 2.5s 后走 code 回落 → **同一个文件被打开两次**
+                #    （VS Code 里两个标签页/两个窗口）。登记必须早于发布。
+                slot = {'event': threading.Event(), 'ok': False, 'method': None}
                 with settings_lock:
                     seq = _as_seq(settings.get('openCorpusSeq')) + 1
                     settings['openCorpusSeq'] = seq
+                    with _corpus_open_lock:
+                        _corpus_open_wait[seq] = slot
                     saved = save_settings(settings)
                 log('[airi-corpus] open requested (seq=%d, saved=%s)' % (seq, saved))
-                threading.Thread(target=_open_corpus_worker, args=(seq,),
+                threading.Thread(target=_open_corpus_worker, args=(seq, slot),
                                  daemon=True).start()
                 self._json_response({'ok': True, 'openCorpusSeq': seq,
                                      'saved': saved})
