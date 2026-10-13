@@ -1,5 +1,108 @@
 # Change Log
 
+## [0.3.31] — 2026-10-14
+
+> 例行审计。这轮逮到 **5 个缺陷**，全都具有同一个形状：**"宣告成功"与
+> "东西真的到位"分家**。每一个都拿到了"修复前失败 / 修复后通过"的实测对照，
+> 并各自补齐了会红的回归。
+
+### Fixed
+
+- **`AIRI_CUBISM_CORE` 谎报成功 → 桌宠在开窗之前整个进程崩掉（用户侧零痕迹）。**
+  `ensure_core()` 的 env 分支以前直接 `return True` —— 文件还躺在用户自己
+  指定的路径上，而调用方 `check_assets()` 紧接着 `CORE_PATH.stat()` 落点 →
+  `FileNotFoundError` 一路逃出 `standalone.main()`。表现是**点了启动，什么都
+  没发生**：没有窗口、没有报错、`.airi-pet.log` 里连一行都没有（扩展用
+  `stdio:'ignore'` 起进程，`print` 全被丢掉）。
+  而且这个 env 变量**本来也不可能生效** —— 页面只会从 `/vendor/` 取 core
+  （见 `common._AssetHandler`），所以"跳过下载"必须等于"把文件搬到位"。
+  修法：抽出 `_cache_core_from()` 作为"搬到落点"的单一实现，env 分支改成
+  `if _core_ok(path) or _cache_core_from(src, path): return True`。
+  ⚠️ **全新克隆必现**：`live2dcubismcore.min.js` 在 `.gitignore` 里。
+- **`check_assets()` 的隐性契约收口为"永不抛异常"。** 它只是一次"能不能上
+  Live2D"的自检，失败的正确后果是退回图片 / CSS 角色 —— 而不是让桌宠起不来。
+  两个入口（`standalone.main` / `main.main`）都是**裸调用**，所以"不抛"
+  只能由函数自己保证。现在它是"永不抛"的包装 + `_check_assets()` 实现体，
+  收尾那次 `CORE_PATH.stat()` 也进了 `try`（宁可降级，不要抛）。
+- **`/event` 的入参没做类型守卫，把良性畸形输入伪装成"解析错误"。**
+  分支里写的是 `p = msg.get('payload') or {}` —— 只兜 falsy。`payload=5`
+  这种**真值非 dict** 会在 `p.get` 上抛 `AttributeError`，再被外层 `except`
+  记成 `[airi-standalone] /event parse failed`。`/push` 侧早就有 `isinstance`
+  守卫（0.3.25），这是同一个坑的第二个入口。实测 15 条畸形输入里 **10 条**
+  被记成 parse failed —— 在排障日志里制造假线索（0.3.26 就是被这类假线索
+  带偏的）。修法：`_as_dict()` 收敛 payload、顶层非对象改为留痕
+  `ignored non-object body: <类型>`、`_corpus_open_ack` 的 `int()` 补兜
+  `OverflowError`（Python 的 `json` **默认接受**字面量 `Infinity`）。
+- **资产服务器：`HEAD` 绕过整个白名单。** 处理器只覆写了 `do_GET`，于是
+  HEAD 落到 `SimpleHTTPRequestHandler.do_HEAD → send_head() → translate_path()`，
+  而它依赖的 `self.directory` **从来没被指定过** = 进程 CWD；扩展拉起桌宠时
+  cwd 恰好是 `desktop_pet/`。实测：
+  `HEAD /common.py → 200 Content-Length=48284`、`HEAD /standalone.py → 200
+  Content-Length=48069`（对照 `GET /common.py → 404`）。页面**从来不发 HEAD**
+  （页面本体与模型都用 GET），这条路纯属攻击面。修法：`do_GET` / `do_HEAD`
+  共用同一份 `_dispatch()` 路由（不是"再补一份 HEAD 白名单"）。
+- **资产服务器：畸形路径把请求打崩。** `_safe_join()` 里 `Path.resolve()`
+  遇到内嵌 NUL 抛的是 `ValueError`（不是越界那种 `ValueError(relative_to)`），
+  而它不在任何 `try` 里 → 一个 `GET /vendor/%00` 就让请求**直接断连**
+  （客户端 `RemoteDisconnected`），宿主控制台吐一整段
+  `ValueError: stat: embedded null character in path`。修法：把 `ValueError`/
+  `OSError` 一起兜住，走与越界同一条路（403）。
+- **异形窗口：早退路径泄漏 GDI 区域句柄。** `_apply_window_region()` 里
+  `if not kept:`（所有矩形都被裁没）这条路上，`h_total` 既没交给系统
+  （`SetWindowRgn` 没被调到）也没自己 `DeleteObject` —— **每次调用泄漏
+  1 个 GDI 句柄**。region 是页面 **500ms 一拍**推上来的，也就是每秒 2 个；
+  进程 GDI 句柄默认上限 10000，到顶后 `CreateRectRgn` 开始失败，
+  "异形窗口"这个功能就**永久坏掉**（不是变慢，是彻底不工作）。
+  这条早退路径还特别容易进：最小化、DPR 变化的一瞬间、拖出屏幕把矩形
+  全裁掉，都会得到 `kept == 0`。修法：早退前 `gdi32.DeleteObject(h_total)`
+  （另两条退出路径一直是删了的，只有这条漏了）。
+
+### Tests
+
+- **`test_live2d_assets_core.py`（新增）** —— Bug "env 谎报成功"的回归。
+  含一条**旧 bug 形状的单元复刻**：把 `ensure_core` 换成 `lambda: True`
+  谎报成功 → `check_assets()` 必须返回 `(False, [...])` 而**不是抛**。
+  隔离做全：core 落点整体搬进 `%TEMP%`（同时改 `CORE_PATH` 与
+  `ensure_core.__defaults__`）、`Path.home()` 指向假 HOME（否则"复用
+  `~/.dsh/pets` 副本"那条路会真的读用户机器，让"断网应失败"的用例假通过）、
+  `CORE_URL` 指向死地址。
+- **`test_asset_server.py`（新增）** —— HEAD 白名单 + 畸形路径的回归。
+  ⚠️ 它**必须把 cwd 切到 `desktop_pet/`**（复现扩展拉起时的条件），否则
+  缺陷在修复前也"看起来是好的"。断言含 5 个白名单外源码文件必须 404、
+  白名单内三条路的 `Content-Length` 等于磁盘实际字节数、`favicon` 204 无 body、
+  5 条内嵌 NUL 与 3 条 `..` 越界必须 403 且**一条都不断连**。
+- **`test_region_handle_leak.py`（新增）** —— GDI 句柄泄漏的回归。
+  判据是**增量随 N 的线性度**而不是单次数值：N=200 / N=2000 两阶梯。
+  ⚠️ 两个测量陷阱都写进了断言：`GetGuiResources(GetCurrentProcess(), ...)`
+  **恒返回 0**（伪句柄不被接受，必须 `OpenProcess(0x0400)`）；
+  泄漏会把句柄顶到上限让后续测量全部失真。安全性：只走 `kept == 0` 的
+  早退分支（`SetWindowRgn` 根本不会调到），并在末尾复核**桌面窗口的 region
+  签名（类型 + 外接框）前后一致**。
+- **`test_push_hardening.py` 补 2.7 段（13 → 28 条用例）** —— `/event` 侧的
+  离线版断言：15 条**合法 JSON** 的畸形输入一个都不该产生
+  `parse failed`（断言日志行数增量 == 0），且顶层非对象要留痕、坏 `seq`
+  要走"迟到回执"分支而非崩。
+- **三个新回归都实测过"有判断力"**（同一批输入跑 HEAD `324ee85` vs 工作区）：
+
+  | 回归 | 修复前 | 修复后 |
+  |---|---|---|
+  | `/event` 畸形输入（15 条） | `parse failed` = **10**，无忽略留痕 | **0**，有忽略留痕 |
+  | `HEAD /common.py` | **200** `CL=48284` | **404** |
+  | `GET /vendor/%00` | **`RemoteDisconnected`**（+ traceback） | **403** |
+  | region 早退 N=200 / N=2000 | 增量 **200 / 2000**（1.00000/次） | **5 / 0** |
+
+- 全量离线回归 **17 项全 rc=0**（原 14 项 + 新增 3 项；`test_push_hardening`
+  是扩充而非新增）。`py_compile` 三个改动文件通过。
+- **生产侧零污染复核**：`desktop_pet/.airi-pet.log` 仍是 2944 字节 /
+  Oct 12 09:18（未被测试写入），`~/.dsh/pets/` 快照未变。
+
+### Notes
+
+- 用户侧待验证（本轮只有代码级证据，未在真机窗口上跑）：
+  重启 VS Code + 重开桌宠后，`.airi-pet.log` 里应能看到
+  `cubism core ... bytes` 而不是崩在开窗前；「编辑语料」的三级回落在
+  扩展未运行时走 `code` 命令那级。
+
 ## [0.3.30] — 2026-10-13
 
 > 审计「编辑语料」（0.3.29）时逮到两个问题，都在那条**三级回落**的通路上。
