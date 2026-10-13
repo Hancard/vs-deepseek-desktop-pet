@@ -452,6 +452,146 @@ check('openCorpus 的 HTTP 路径立刻返回（打开动作在后台线程里�
       st == 200 and json.loads(txt).get('openCorpusSeq') == 3, txt)
 check('HTTP 触发的后台 worker 收工后也不残留等待槽', drain())
 
+# ---- K. v0.3.30 修的两处：code 拼串引号 / 等待槽"先登记再发布" ----
+out('')
+out('K. code 命令拼串引号 + 等待槽的登记时机')
+
+# K1：拼出来的命令行必须把 **exe 也**引起来。
+#     本机 shutil.which('code') 返回 `S:\Microsoft VS Code\bin\code.CMD`——含
+#     空格。旧写法 exe 裸拼，cmd.exe 会拿 `S:\Microsoft` 当命令名 → 找不到；
+#     而 Popen 不抛错（stderr 丢进 DEVNULL），于是**谎报成功**、第三级
+#     os.startfile 永远轮不到。这一条只看字符串形状，行为验证在 K2。
+captured = []
+_real_subproc = standalone.subprocess
+
+
+class _FakePopen:
+    def __init__(self, cmd, **kw):
+        captured.append((cmd, kw))
+        self.returncode = 0
+
+
+class _FakeSubproc:
+    Popen = _FakePopen
+    DEVNULL = _real_subproc.DEVNULL
+    # _launch_code_cli 在 try **之外**调 list2cmdline 拼串 —— 替身必须带着它
+    list2cmdline = staticmethod(_real_subproc.list2cmdline)
+
+
+_real_shutil = standalone.shutil
+
+
+class _FakeShutil:
+    @staticmethod
+    def which(name):
+        return r'C:\Program Files\Some Editor\bin\code.CMD' if name == 'code' else None
+
+
+try:
+    standalone.subprocess = _FakeSubproc
+    standalone.shutil = _FakeShutil
+    got_k1 = standalone._launch_code_cli(
+        r'C:\Users\x y\.dsh\pets\airi-pet-corpus.jsonc')
+finally:
+    standalone.subprocess = _real_subproc
+    standalone.shutil = _real_shutil
+
+_cmd = captured[0][0] if captured else ''
+check('_launch_code_cli 返回 code-cli', got_k1 == 'code-cli', got_k1)
+check('命令行里 exe 也带引号（含空格路径不会被 cmd 拆开）',
+      _cmd.startswith('"'), _cmd)
+check('两个参数各自带引号（共 4 个）', _cmd.count('"') == 4, _cmd)
+check('仍然 shell=True（.cmd 必须经 cmd.exe）',
+      bool(captured) and captured[0][1].get('shell') is True, captured[:1])
+
+# K2：**行为**验证 —— 这才是当初 bug 的直接复现。
+#     用一个同形状的替身（含空格目录下的 .cmd）走真实 subprocess，断言它
+#     **真的被执行**（往自己旁边写一个 marker）。旧写法这里 marker 不会生成，
+#     却照样返回 'code-cli' + 冒一句"台词库打开了"。
+STUB_DIR = os.path.join(tempfile.gettempdir(), 'airi corpus space dir')
+STUB_MARK = os.path.join(STUB_DIR, 'marker.txt')
+STUB_CMD = os.path.join(STUB_DIR, 'stub.cmd')
+os.makedirs(STUB_DIR, exist_ok=True)
+if os.path.exists(STUB_MARK):
+    os.remove(STUB_MARK)
+with io.open(STUB_CMD, 'w', encoding='ascii', newline='\r\n') as _fh:
+    _fh.write('@echo off\r\n')
+    _fh.write('> "%~dp0marker.txt" echo ran\r\n')
+
+
+class _StubShutil:
+    @staticmethod
+    def which(name):
+        return STUB_CMD if name == 'code' else None
+
+
+_real_shutil2 = standalone.shutil
+try:
+    standalone.shutil = _StubShutil
+    got_k2 = standalone._launch_code_cli(
+        os.path.join(STUB_DIR, 'does-not-need-to-exist.jsonc'))
+finally:
+    standalone.shutil = _real_shutil2
+
+_deadline = time.time() + 10.0
+while time.time() < _deadline and not os.path.exists(STUB_MARK):
+    time.sleep(0.05)
+check('含空格路径的 code 替身**真的被执行了**（旧写法在这里静默失败）',
+      os.path.exists(STUB_MARK), STUB_MARK)
+check('返回值仍是 code-cli', got_k2 == 'code-cli', got_k2)
+
+# K3：code 命令整个找不到时，必须落到第 3 级 os.startfile，而不是静默返回 None
+_started = []
+_real_startfile = os.startfile
+_real_fallback_fn = _saved_fallback          # 第 304 行存的**真身**（此时全局的是桩）
+
+
+class _NoCodeShutil:
+    @staticmethod
+    def which(name):
+        return None
+
+
+_real_shutil3 = standalone.shutil
+os.startfile = lambda p: _started.append(p)
+try:
+    standalone.shutil = _NoCodeShutil
+    _m = _real_fallback_fn(r'X:\nope\airi-pet-corpus.jsonc')
+finally:
+    standalone.shutil = _real_shutil3
+    os.startfile = _real_startfile
+check('code 命令不存在 → 落到 os.startfile（第 3 级）', _m == 'system-default', _m)
+check('os.startfile 拿到的是语料路径',
+      _started == [r'X:\nope\airi-pet-corpus.jsonc'], _started)
+
+# K4：等待槽必须在"落盘发布"**之前**登记好。
+#     旧写法先落盘、由后台线程稍后登记 → 扩展可能在下一次 500ms 轮询就回执，
+#     回执先到会被当成"迟到回执"丢掉 → worker 白等 2.5s 后走 code 回落 →
+#     同一个文件被打开两次。把超时放大到 5s 让窗口可观测。
+_saved_timeout_k = standalone.CORPUS_OPEN_ACK_TIMEOUT
+standalone.CORPUS_OPEN_ACK_TIMEOUT = 5.0
+_st, _tx = req('POST', '/settings', {'openCorpus': True})
+_seq_k = json.loads(_tx).get('openCorpusSeq') if _st == 200 else None
+with standalone._corpus_open_lock:
+    _present = _seq_k in standalone._corpus_open_wait
+check('POST 一返回，等待槽就已经登记好了（登记早于发布）', _present, _seq_k)
+# 收尾：给个回执，别让 drain 等满 5 秒
+standalone._corpus_open_ack(_seq_k, True, 'vscode')
+standalone.CORPUS_OPEN_ACK_TIMEOUT = _saved_timeout_k
+check('给回执后 worker 摘槽、不残留', drain())
+
+# K5：静态不变量 —— 把上面几条钉在源码上（改回去就红）
+_src = io.open(os.path.join(PET, 'standalone.py'), encoding='utf-8').read()
+_blk_i = _src.find("if msg.get('openCorpus'):")
+_blk = _src[_blk_i:_blk_i + 3000]
+_reg = _blk.find('_corpus_open_wait[seq] = slot')
+_sav = _blk.find('saved = save_settings')
+check('源码里"登记等待槽"排在"落盘"之前（顺序不变量）',
+      _blk_i >= 0 and 0 <= _reg < _sav, (_blk_i, _reg, _sav))
+check('code 回落用 list2cmdline 拼串（exe 自带引号）',
+      'list2cmdline' in _src)
+check('worker 提前返回路径也会摘槽（不泄漏）', '_corpus_release(seq, slot)' in _src)
+
 standalone.CORPUS_OPEN_ACK_TIMEOUT = _saved_timeout
 standalone._open_corpus_fallback = _saved_fallback
 
