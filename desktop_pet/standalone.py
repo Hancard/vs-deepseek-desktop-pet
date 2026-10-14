@@ -814,6 +814,35 @@ def _ping_ok(port: int) -> bool:
     except Exception:
         return False
 
+def _merge_webview2_args(prev: str) -> str:
+    """把桌宠必需的 WebView2 开关**并进**已有的 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS。
+
+    ⚠️ 为什么不能用 os.environ.setdefault（0.3.32 修）：扩展拉起桌宠时，子进程
+    继承 VS Code 宿主进程的完整环境 —— 只要宿主链上任何一环设过这个变量，
+    setdefault 就会**整组静默放弃**我们的开关（不报错、日志无痕），四条禁节流
+    形同虚设。合并策略：宿主的开关全保留，我们的补在后面（重复对 Chromium 无害）。
+
+    ⚠️ `--disable-features` 是唯一有"后写覆盖先写"风险的开关（它的值是逗号表），
+    必须把两边的 feature 取并集、合成**一个** flag，否则会把别人的 feature 顶掉。
+    """
+    _REQUIRED = ('--disable-background-timer-throttling',
+                 '--disable-renderer-backgrounding',
+                 '--disable-backgrounding-occluded-windows')
+    _FEATURES = ('IntensiveWakeUpThrottling', 'CalculateNativeWinOcclusion')
+
+    feats = set(_FEATURES)
+    kept = []
+    for tok in (prev or '').split():
+        if tok.startswith('--disable-features='):
+            feats.update(f for f in tok[len('--disable-features='):].split(',') if f)
+        else:
+            kept.append(tok)
+    for arg in _REQUIRED:
+        if arg not in kept:
+            kept.append(arg)
+    kept.append('--disable-features=' + ','.join(sorted(feats)))
+    return ' '.join(kept)
+
 def main():
     global _api_ref
     try:
@@ -878,13 +907,15 @@ def main():
     # 桌宠是全透明异形窗口，最容易被 Chromium 的可见性启发式误判成后台页 ——
     # 第十轮实锤：定时器停摆后 region 冻结在气泡动画中途量出的过期形状上，
     # 最新气泡的顶边被永久裁掉一截，8s 自动消失也停摆。这些开关禁掉整类节流
-    # （WebView2 加载器在创建环境时读这个环境变量；setdefault 留出覆盖口子）。
-    os.environ.setdefault(
-        'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
-        '--disable-background-timer-throttling '
-        '--disable-renderer-backgrounding '
-        '--disable-backgrounding-occluded-windows '
-        '--disable-features=IntensiveWakeUpThrottling')
+    # （WebView2 加载器在创建环境时读这个环境变量）。
+    # 0.3.32：① 改用**合并**而非 setdefault（见 _merge_webview2_args 的注释）；
+    # ② 补 CalculateNativeWinOcclusion —— 桌宠是分层（region 裁剪）+ 置顶窗口，
+    #    正是 Windows 原生遮挡计算最容易误判成"被完全盖住"的形状；前三个开关
+    #    都还在的情况下页面依然在最后一次点击后 ~0.4s 被冻结（心跳证据：点击
+    #    那一刻心跳还是新的，23s 后截图时两条 8s TTL 的气泡都没消失），
+    #    剩下的嫌疑就落在这条遮挡启发式上。
+    os.environ['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = _merge_webview2_args(
+        os.environ.get('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', ''))
     screen_w, screen_h = get_screen_size()
     win_w, win_h = 300, 480
     # get_screen_size() 是物理像素，pywebview 的 create_window(x=,y=) 按
