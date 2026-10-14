@@ -163,7 +163,16 @@ class WindowAPI:
         过期形状、气泡 8s 自动消失也停摆 —— 以前这条链路是**完全静默**的，
         用户只能看到"气泡被切了一截却永远不恢复"。
         """
-        self._last_heartbeat = time.monotonic()
+        now = time.monotonic()
+        gap = (now - self._last_heartbeat) if self._last_heartbeat else 0.0
+        self._last_heartbeat = now
+        # 冻结期间**什么都执行不了**（包括这条日志），所以只能在恢复的第一拍
+        # 补记：间隔 >5s 意味着中间那段时间的 region 推送与气泡 8s 自动消失
+        # 全部停摆。0.3.32 那次就是这么查出来的 —— 日志里连一条痕迹都没有，
+        # 只剩"气泡被裁成两个字、还迟迟不消失"的截图。
+        if gap > 5.0:
+            self._log_region('WARNING: JS 心跳恢复，但停摆了 %.1fs —— 期间'
+                             '窗口形状与气泡自动消失均已冻结' % gap)
         return True
 
     def js_heartbeat_lag(self):
