@@ -1126,6 +1126,15 @@
       lastBubbleChangeAt = Date.now();
       fitBubbles();
       markOldBubbles();
+      // ⚠️ 宽度也必须锁（0.3.32 用户截图实锤）：清空文本后 shrink-to-fit
+      //    的盒子会**塌缩成 padding 宽（~32px）**，0ms 后那次强制形状推送
+      //    量到的就是这条窄条 —— 它一进 region，气泡就被裁成只剩中间两个
+      //    字。正常情况下 540ms 的修正推送能救回来；但页面若在这 540ms 里
+      //    被冻结（本次实锤：最后一次点击后 ~0.4s 定时器停摆，23s 后截图时
+      //    窄条形状仍驻留），就永远没人纠正。高度在上一轮已锁，宽度是同一
+      //    个坑的另一半 —— 两把锁都落下后，气泡从诞生第一帧起就是最终盒子，
+      //    任何时刻被推上 region 都是对的。
+      el.style.width = el.offsetWidth + 'px';     // border-box：offsetWidth 即整盒宽
       el.style.height = el.offsetHeight + 'px';   // 锁定高度再清空打字
       el.textContent = '';
       typeText(el, text);
