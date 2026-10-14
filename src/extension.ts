@@ -566,6 +566,11 @@ function findPythonPath(): string {
 }
 
 async function launchStandalonePet(): Promise<void> {
+	// ⚠️ 必须先**强制重新探测**（v0.3.33）。checkStandaloneAlive() 用的是最长
+	// 15 秒的缓存，桌宠刚死的那段时间里它还是 true —— 用户点状态栏只会看到
+	// "已经在运行了"，然后什么都没发生（要等下一次 10s 的状态栏轮询把缓存
+	// 刷新过来才点得动）。"启动"是用户显式动作，判断必须基于当下的事实。
+	lastHealthCheckAt = 0;
 	if (await checkStandaloneAlive()) {
 		vscode.window.showInformationMessage('deepseek 桌宠已经在运行了');
 		return;
