@@ -287,7 +287,8 @@ async function openCorpusIfRequested(): Promise<boolean> {
 		console.log(`[airi-monitor] open corpus failed: ${String(err)}`);
 	}
 	console.log(`[airi-monitor] corpus open request seq=${seq} ok=${ok}`);
-	postJsonToPet('/event',
+	// 回执是"通知"，不是"事务"：桌宠收不到会走自己的超时回落，这里不 await
+	void postJsonToPet('/event',
 		{ type: 'corpusOpened', payload: { ok, method: 'vscode', seq } });
 	return ok;
 }
@@ -354,9 +355,13 @@ function petTick(): void {
  *  从实时路径移入周期时钟 petTick）
  *  @returns 本批是否已消费（false = 桌宠不可达，调用方需保留脏标记） */
 async function pushPendingDiagnostics(): Promise<boolean> {
-	if (!(await checkStandaloneAlive())) { return false; }
-	// 从未出现过受支持的错误时不推 all_clear（例如无关语言的诊断事件）
+	// ⚠️ 这里以前先做一次 `checkStandaloneAlive()` 再推。那个探测结果**带 15 秒
+	// 缓存**（HEALTH_CHECK_INTERVAL_MS），桌宠刚死的窗口里它是陈旧 true：
+	// 消息投不出去，却因为"探测说活着"而被当成已消费 —— 脏标记被清掉，
+	// 这批诊断变化就此消失（除非用户又改出新的错误）。
+	// 现在不看缓存、直接投，只认"有没有收到 2xx"。
 	const workspaceErrors = collectErrors();
+	// 从未出现过受支持的错误时不推 all_clear（例如无关语言的诊断事件）
 	if (workspaceErrors.length === 0 && !hadRelevantErrors) { return true; }
 
 	const message = workspaceErrors.length > 0
@@ -383,10 +388,12 @@ async function pushPendingDiagnostics(): Promise<boolean> {
 		workspaceErrors.map((e) => `${e.file}|${e.line}|${e.message}`),
 	]);
 	if (signature === lastPushSignature) { return true; }
-	lastPushSignature = signature;
 
-	pushToStandalone(message);
-	return true;
+	// ⚠️ 签名要在**确认送达之后**才提交：先记再投的话，投失败时下一拍会被
+	// "和上次一样"挡掉 —— 这条播报就再也不会补发（与"脏标记不可吞"同源）。
+	const delivered = await pushToStandalone(message);
+	if (delivered) { lastPushSignature = signature; }
+	return delivered;
 }
 
 /** 每个文件的监视状态（只保留最近一个文件） */
@@ -466,8 +473,12 @@ function scanActiveFile(): boolean {
 	};
 
 	void (async () => {
-		if (await checkStandaloneAlive()) { pushToStandalone(message); return; }
-		// 桌宠不可达：这一条没送出去，把**整条决策状态回滚**（含 signature），
+		// 以**真实投递结果**为准，不再拿带 15s 缓存的健康探测做前置判断
+		// （见 postJsonToPet 的注释）：桌宠刚死时缓存还是 true，旧写法会
+		// 把这一次"说话"当成已生效，bug 首播就此消失。
+		const delivered = await pushToStandalone(message);
+		if (delivered) { return; }
+		// 没送出去：这一条没送到，把**整条决策状态回滚**（含 signature），
 		// 让下一拍从头再判一次。只把 lastPushAt 提前到 now 的旧写法会让状态
 		// 显示"已经报过"——bug 首播被静默吞掉，用户要么等满一个 repeatSec
 		// 冷却、要么永远收不到"干净了"（count=0 走不到 remind 分支）。
@@ -610,29 +621,59 @@ async function launchStandalonePet(): Promise<void> {
 // pushToStandalone() — HTTP POST 到独立桌宠服务器
 // ============================================================================
 
-/** 向桌宠服务器 POST 一段 JSON。桌宠没起来时静默跳过（这是常态，不是错误）。
- *  @param path '/push'（推消息给桌宠）或 '/event'（上报事件） */
-function postJsonToPet(path: string, message: unknown, timeoutMs = 500): void {
-	try {
-		const body = JSON.stringify(message);
-		const req = http.request({
-			hostname: '127.0.0.1', port: STANDALONE_PORT, path,
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Content-Length': Buffer.byteLength(body),
-			},
-			timeout: timeoutMs,
-		}, () => { /* 忽略响应 */ });
-		req.on('error', () => { /* 服务器未运行，静默跳过 */ });
-		req.on('timeout', () => { req.destroy(); });
-		req.write(body);
-		req.end();
-	} catch { /* 静默失败 */ }
+/** 向桌宠服务器 POST 一段 JSON。
+ *  @param path '/push'（推消息给桌宠）或 '/event'（上报事件）
+ *  @returns **是否真的送到了**（收到 2xx）。桌宠没起来时返回 false，不抛。
+ *
+ *  ⚠️ 为什么必须回传投递结果（v0.3.33）：旧写法忽略响应、直接返回 void，
+ *     于是调用方只能拿 `checkStandaloneAlive()` 的**缓存**（最长 15s）当
+ *     "送没送到"的依据 —— 桌宠刚死的那一小段窗口里缓存仍然是 true：
+ *     状态照常提交、消息投进黑洞，而 petTick 里"桌宠不可达就回滚"的那套
+ *     不变量（0.3.19 定的：脏标记绝不能被吞）**事实上失效**。用户侧的表现
+ *     是：桌宠重启后第一条 bug 播报不见了，file_scan 那条要等满一个
+ *     repeatSec（60s）才会再提醒一次。
+ *     现在的判据是"HTTP 有没有真的收到 2xx" —— 这是唯一的事实。
+ *     顺带在失败时立刻作废健康缓存，免得后续决策继续用陈旧结论。 */
+function postJsonToPet(path: string, message: unknown, timeoutMs = 500): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		try {
+			const body = JSON.stringify(message);
+			const req = http.request({
+				hostname: '127.0.0.1', port: STANDALONE_PORT, path,
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Content-Length': Buffer.byteLength(body),
+				},
+				timeout: timeoutMs,
+			}, (res) => {
+				res.resume();
+				const code = res.statusCode ?? 0;
+				resolve(code >= 200 && code < 300);
+			});
+			req.on('error', () => {
+				// 服务器未运行 / 连接被拒：静默，但让下一次探测重新来过
+				standaloneHealthy = false;
+				lastHealthCheckAt = 0;
+				resolve(false);
+			});
+			req.on('timeout', () => {
+				req.destroy();
+				standaloneHealthy = false;
+				lastHealthCheckAt = 0;
+				resolve(false);
+			});
+			req.write(body);
+			req.end();
+		} catch {
+			resolve(false);
+		}
+	});
 }
 
-function pushToStandalone(message: unknown): void {
-	postJsonToPet('/push', message);
+/** 推消息给桌宠。 @returns 是否送达（未送达的调用方必须回滚自己的状态） */
+function pushToStandalone(message: unknown): Promise<boolean> {
+	return postJsonToPet('/push', message);
 }
 
 // ============================================================================
