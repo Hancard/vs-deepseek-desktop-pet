@@ -1100,6 +1100,26 @@
       }
     }
 
+    // ---- 文案长度上限 ----
+    // 气泡能显示多少字是**有物理上限**的：max-height:132px + 13px/1.7 的行高
+    // ≈ 5~6 行，再多的字被 overflow:hidden 直接裁掉 —— 用户一行都看不到。
+    // 但 typeText 是**按字定速**的（最少 16ms/字），于是"看不见的字"照样要
+    // 一字一字打完：实测 5000 字要打 80 秒、50000 字要打 13.3 分钟（0.3.34），
+    // 这段时间气泡被它占着，后面的话排不上号（MAX_BUBBLES=2）。
+    // ⚠️ 这不是"外部攻击者才会踩"的理论风险：右键「编辑语料」是给用户自己
+    //    用的（落点 ~/.dsh/pets/airi-pet-corpus.jsonc），在里面写一条长台词
+    //    保存，桌宠就会照着念 —— 实测 5000 字 = 80 秒。
+    var MAX_BUBBLE_CHARS = 200;
+
+    /** 把文案裁到气泡显示得下的长度；非字符串先转成字符串（typeText 要
+     *  用 length / charAt，数字和对象都没有这些方法）。 */
+    function clipBubbleText(text) {
+      if (typeof text !== 'string') { text = String(text); }
+      if (text.length <= MAX_BUBBLE_CHARS) { return text; }
+      return text.slice(0, MAX_BUBBLE_CHARS) + '…（已省略 '
+        + (text.length - MAX_BUBBLE_CHARS) + ' 字）';
+    }
+
     // 打字机效果：逐字显示，让气泡更生动
     function typeText(el, text) {
       var i = 0;
@@ -1115,6 +1135,7 @@
     function showBubble(text, isError) {
       // 空文案不建气泡：只会留一块看不见的空 region 挂 8 秒（后端返回空 text 时）
       if (!text) return;
+      text = clipBubbleText(text);   // 见 MAX_BUBBLE_CHARS：裁掉"看不见但要打几分钟"的部分
       pruneBubbles();
       var el = document.createElement('div');
       el.className = isError ? 'bubble error' : 'bubble';
