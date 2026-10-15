@@ -1125,6 +1125,9 @@
       var i = 0;
       var speed = Math.max(16, Math.min(38, Math.round(1100 / Math.max(text.length, 1))));
       (function type() {
+        // 气泡已经被移除了（8 秒 TTL 到期 / 被新气泡挤掉）就别再往一个
+        // 脱离文档的节点里打字 —— 长文案被打断时这里会空转好几分钟。
+        if (!el.isConnected) { return; }
         if (i < text.length) {
           el.textContent += text.charAt(i++);
           setTimeout(type, speed);
