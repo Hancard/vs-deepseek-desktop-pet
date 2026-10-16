@@ -18,6 +18,7 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from urllib.parse import urlsplit
 
 from common import (get_screen_size, get_dpi_scale, WindowAPI, find_character_image,
                     load_html, start_asset_server, disable_window_backdrop,
@@ -374,6 +375,51 @@ def _init_log():
 # 多线程 HTTP 服务器
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+# ---------------------------------------------------------------------------
+# 跨源护栏（0.3.35）
+#
+# 桌宠的 HTTP 服务需要 CORS 才能工作：ui.html 是从**资产服务器**
+# （127.0.0.1:<动态端口>）加载的，而它要请求的是**主服务**
+# （127.0.0.1:<PORT>）—— 端口不同就是跨源，不带 CORS 头前端一个请求都发不出去
+# （0.3.25 踩过：相对 URL 打到资产服务器 404）。
+#
+# 但 CORS 头写成 '*' 等于**把桌宠开放给整个互联网**：实测（0.3.35）
+#   POST /push   Origin: https://evil.example.com -> 200，桌宠照着念任意文案
+#   GET  /settings                                -> 200，设置被读走
+#   OPTIONS 预检                                   -> 204 一路放行
+# 也就是说用户随手打开的一个网页就能：① 冒充桌宠说话（"你的构建失败了，
+# 点这里修复"这类钓鱼文案）② 开 /events 偷听 —— SSE 流里有 file_scan 的
+# 文件名、代码行和诊断内容。
+#
+# 修法：只在 Origin 是**回环地址**时放行。非浏览器客户端（VS Code 扩展 /
+# curl / python）根本不发 Origin，照旧放行 —— 本机进程本来就在信任边界内，
+# 护栏针对的是"网页"。
+# ---------------------------------------------------------------------------
+
+# 回环地址的几种写法；IPv6 的 hostname 解析后不带方括号，两种都收
+_LOOPBACK_HOSTS = frozenset(('127.0.0.1', 'localhost', '::1'))
+
+
+def _origin_allowed(origin):
+    """这个 Origin 是不是来自本机的页面？
+
+    返回 True 的三种情况：
+      - 没有 Origin 头（非浏览器客户端：扩展 / curl / python 脚本）
+      - Origin 是回环地址（桌宠自己的页面：资产服务器动态端口）
+      - 以上都不是 → False
+    """
+    if not origin:
+        return True
+    if origin == 'null':
+        # file:// 页面和 sandbox iframe 都会发 'null'。桌宠页面是
+        # http://127.0.0.1:<port>，用不到它；而沙箱 iframe 是攻击者
+        # 随手就能造出来的（<iframe sandbox>），放行等于把护栏拆了。
+        return False
+    try:
+        host = (urlsplit(origin).hostname or '').lower()
+    except Exception:
+        return False
+    return host in _LOOPBACK_HOSTS
 
 # ---------------------------------------------------------------------------
 # SSE 消息队列（线程安全，有上限防内存泄漏）
@@ -508,26 +554,56 @@ class AiriHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def handle_error(self, request, client_address):
-        """吞掉「客户端提前断开」的噪声。
+    # ---- 跨源护栏（见文件上方的说明）----
+    def _cors_guard(self):
+        """非本机来源直接 403，且**不执行**任何动作。True = 可以继续处理。"""
+        origin = self.headers.get('Origin')
+        if _origin_allowed(origin):
+            return True
+        # 留痕：这是"有人想从网页操纵桌宠"的唯一证据，静默拒绝会无从查起
+        log('[airi-http] blocked cross-origin %s %s (Origin=%r)'
+            % (self.command, self.path, origin))
+        # 先把请求体读完再回 403：HTTP/1.0 下服务端随即关连接，若接收缓冲区
+        # 里还剩没读的字节，Windows 会发 RST 把刚写出去的响应一起冲掉 ——
+        # 浏览器看到的就是"连接被重置"而不是一个干净的 403。
+        try:
+            remaining = int(self.headers.get('Content-Length') or 0)
+        except (TypeError, ValueError):
+            remaining = 0
+        while remaining > 0:
+            try:
+                chunk = self.rfile.read(min(remaining, 65536))
+            except Exception:
+                break
+            if not chunk:
+                break
+            remaining -= len(chunk)
+        self.send_response(403)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{"error":"cross-origin blocked"}')
+        return False
 
-        桌宠关窗时 SSE 长连接会被 reset，socketserver 默认会把
-        ConnectionResetError/BrokenPipeError 打成整段 traceback，看起来像崩溃。
-        真正意外的错误照旧抛出去。
+    def _cors_header(self):
+        """只给允许的来源回 CORS 头。
+
+        原来是写死的 '*'（等于对任何网页开放）。现在改回显请求里的 Origin ——
+        前提是它已经过 _cors_guard；没有 Origin 头的（扩展 / curl）根本不看
+        CORS，不需要这个头。
         """
-        exc = sys.exc_info()[1]
-        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
-                            BrokenPipeError, TimeoutError)):
-            return
-        super().handle_error(request, client_address)
+        origin = self.headers.get('Origin')
+        if origin and _origin_allowed(origin):
+            self.send_header('Access-Control-Allow-Origin', origin)
 
     def do_GET(self):
+        if not self._cors_guard():
+            return
         if self.path == '/events':
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
             self.send_header('Connection', 'keep-alive')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._cors_header()
             self.end_headers()
             self.wfile.write(b':ok\n\n')
             # 断线续传：EventSource 自动重连时会带上最后收到的 id（Last-Event-ID 头）。
@@ -578,6 +654,8 @@ class AiriHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        if not self._cors_guard():
+            return
         if self.path in ('/push', '/diagnostics'):
             try:
                 length = int(self.headers.get('Content-Length', 0))
@@ -727,7 +805,7 @@ class AiriHandler(BaseHTTPRequestHandler):
             if not isinstance(msg, dict):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._cors_header()
                 self.end_headers()
                 self.wfile.write(b'{"error":"bad request"}')
                 return
@@ -762,7 +840,7 @@ class AiriHandler(BaseHTTPRequestHandler):
                 # 拿不准就当坏请求，别顺手改掉用户设好的值。
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._cors_header()
                 self.end_headers()
                 self.wfile.write(b'{"error":"missing detectIntervalSec"}')
                 return
@@ -782,8 +860,16 @@ class AiriHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_OPTIONS(self):
+        # 预检也要过护栏：放行了预检，浏览器才会把真正的 POST 发出去。
+        # 不给非法来源回 ACAO，浏览器自己就会把后续请求挡掉（双保险）。
+        if not _origin_allowed(self.headers.get('Origin')):
+            log('[airi-http] blocked cross-origin preflight %s (Origin=%r)'
+                % (self.path, self.headers.get('Origin')))
+            self.send_response(403)
+            self.end_headers()
+            return
         self.send_response(204)
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._cors_header()
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
@@ -791,7 +877,7 @@ class AiriHandler(BaseHTTPRequestHandler):
     def _json_response(self, data):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._cors_header()
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
 
