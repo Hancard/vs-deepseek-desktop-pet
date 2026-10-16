@@ -992,19 +992,7 @@ def _make_handler(html_text: str):
         def log_message(self, fmt, *args):
             pass          # 桌宠不该往控制台刷请求日志
 
-        def handle_error(self, request, client_address):
-            """吞掉「客户端提前断开」这类噪声。
-
-            WebView2 关窗/刷新时，正在传输的请求会被 reset，socketserver 的默认
-            handle_error 会把 ConnectionResetError / BrokenPipeError 打成一整段
-            traceback —— 看起来像崩溃，其实是正常收尾。真正意外的错误照旧抛出去。
-            """
-            exc = sys.exc_info()[1]
-            if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
-                                BrokenPipeError, TimeoutError)):
-                return
-            super().handle_error(request, client_address)
-
+        # handle_error 在**服务器类** _AssetServer 上（挂在这里不会被调用）
         def _dispatch(self, path: str, body=True):
             """按**白名单**解析路径并应答。do_GET / do_HEAD 共用同一份路由。
 
@@ -1089,6 +1077,31 @@ def _make_handler(html_text: str):
     return _AssetHandler
 
 
+class _AssetServer(ThreadingHTTPServer):
+    """资产服务器用的服务器类。
+
+    ⚠️ handle_error **必须挂在服务器类上**：socketserver 调的是
+    BaseServer.handle_error，请求处理器（BaseRequestHandler）上根本没有这个
+    名字 —— 写在 handler 里就是死代码，一次都不会被调用（0.3.35 实测：
+    连开三次连接再断开，处理器上的计数器始终为 0，traceback 一行没少）。
+    同一个坑 standalone.py 里也踩过，两边一起修的。
+    """
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """吞掉「客户端提前断开」这类噪声。
+
+        WebView2 关窗/刷新时，正在传输的请求会被 reset，socketserver 的默认
+        handle_error 会把 ConnectionResetError / BrokenPipeError 打成一整段
+        traceback —— 看起来像崩溃，其实是正常收尾。真正意外的错误照旧抛出去。
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
+                            BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def start_asset_server(html_text: str, port: int = 0):
     """起一个本地静态服务器，返回 (base_url, actual_port)。失败返回 (None, 0)。
 
@@ -1101,7 +1114,7 @@ def start_asset_server(html_text: str, port: int = 0):
             port = 0
 
     try:
-        srv = ThreadingHTTPServer(('127.0.0.1', port), _make_handler(html_text))
+        srv = _AssetServer(('127.0.0.1', port), _make_handler(html_text))
     except OSError as exc:
         print(f'[airi-common] asset server failed to bind: {exc!r}')
         return None, 0

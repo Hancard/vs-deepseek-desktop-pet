@@ -375,6 +375,26 @@ def _init_log():
 # 多线程 HTTP 服务器
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """吞掉「客户端提前断开」的噪声。
+
+        桌宠关窗时 SSE 长连接会被 reset，socketserver 默认会把
+        ConnectionResetError/BrokenPipeError 打成整段 traceback，看起来像崩溃。
+        真正意外的错误照旧抛出去。
+
+        ⚠️ 这个方法**必须挂在服务器类上**：socketserver 的 handle_error 是
+        BaseServer 的方法，请求处理器（BaseRequestHandler）上根本没有它。
+        0.3.35 之前它被写在了 AiriHandler 里 —— 实测连开三次 SSE 再断开，
+        计数器一次都没被拨动（死代码），traceback 一行没少（详见
+        test_server_noise.py）。
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
+                            BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
 # ---------------------------------------------------------------------------
 # 跨源护栏（0.3.35）
 #
