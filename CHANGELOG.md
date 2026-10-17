@@ -1,5 +1,43 @@
 # Change Log
 
+## [0.3.36] — 2026-10-17
+
+> 用户反馈：「desk 区域点了等同于 body，调整一下各自的触发区」。
+> 这次没有猜 —— 本地渲染不了 Live2D（无头浏览器不可用、模型没声明 HitAreas、
+> 预览图是不透明海报），最后是**读运行中桌宠的窗口 region** 量出来的：
+> `live2d_probe/measure_region.py`（GetWindowRgn + GetRegionData）。
+
+### Fixed
+
+- **desk 分区一条台词都触发不了 —— 旧边界把 desk 带画在了可点击区域之外。**
+  实测（运行中的桌宠，窗口 286x443）：
+  - Live2D canvas 的 CSS 盒是 `161x211 @ (62,179)`（`[airi-sil]` 上报的 cssBox）；
+  - 窗口 region 只有两大块：角色卡 `y 202~353`（card=square，按角色实测外接框
+    贴的正方形卡）和名牌 `y 391~425`；
+  - 换算成 canvas 纵向占比 ry：**角色（含桌子）画在 ry 0.109~0.825**，
+    而 zoneAt 的 desk 带是 `ry>=0.85` —— 整条带落在角色卡下缘之外的缝隙里，
+    缝隙不在窗口 region 内，点击直接穿透到下层窗口。
+  - 所以点桌子永远得到 body 的台词（用户日志 `pet_click #1 zone=body` 实锤）。
+  修法：desk 边界 0.85 → **0.62**（head 0.45 不变 —— Q 版大头，没人抱怨过）。
+  另：`pet_click` 现在带 **ry** 落日志 —— 以后要再校准边界，点一下桌宠、
+  看日志里"那一下点在 canvas 百分之几"就行，不用再起探针。
+
+### Tests
+
+- 新增 `live2d_probe/test_click_zones.py`（12 条）：A 段把 `zoneFromRatio`
+  抽出来在 node 里真跑（12 个边界值）；B 段用**实测数字**钉死
+  "desk 带起点必须在角色卡内（<0.825）"，防止以后又把边界挪出角色外。
+  判断力已验证：对 HEAD(0.3.35) 是 **12 条 FAIL**。
+- 新增 `live2d_probe/measure_region.py`：从运行中的桌宠窗口读 region、
+  反推轮廓行分布（这次的取证工具，留下备用）。
+  ⚠️ 踩坑记录：GDI 的区域类型常量是 `ERROR=0 / NULLREGION=1 / SIMPLEREGION=2 /
+  COMPLEXREGION=3` —— 第一版把 3 当成"错误"，实际 3 = **读到了**复杂区域。
+- 修 `test_pet_corpus.py` H 段的过严断言：**"真实设置文件里不许有
+  openCorpusSeq"改成"测试没让它新出现"**。它是「编辑语料」功能的正常产物，
+  用户用过一次就写在里面（本轮实测：跑测试时用户文件里就有
+  `"openCorpusSeq": 1`，把测试打红了——不是产品坏了，是断言写错了）。
+- 全量回归 **23/23** 通过。
+
 ## [0.3.35] — 2026-10-16
 
 > 例行审计。这轮出动的是「本地服务到底对谁开放」—— 桌宠的 HTTP 服务监听
