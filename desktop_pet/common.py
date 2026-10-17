@@ -295,11 +295,15 @@ class WindowAPI:
         """
         self._click_handler = fn
 
-    def pet_click(self, zone):
+    def pet_click(self, zone, ry=None):
         """ui.html 命中角色后调用，返回 {text, emotion}。
 
         前端只在**真的点到角色像素上**时才调这里（用 canvas alpha 判定），
         所以这里不必再管命中，只管取词。
+
+        ry 是点击点在 canvas 里的纵向占比（0=画布顶 1=画布底，前端算好带来），
+        纯粹为了留痕：分区边界要校准时，日志里直接有"那一下点在百分之几"，
+        不用再起探针（0.3.36）。
 
         ⚠️ 因此：**日志里没有 pet_click，就说明前端认为你没点到角色**
         （alphaAt() < 24 就静默 return），而不是台词库坏了 —— 这两件事
@@ -309,8 +313,10 @@ class WindowAPI:
         try:
             if self._click_handler is not None:
                 text, emotion = self._click_handler(str(zone or 'body'))
-                self._log_input('pet_click #%d zone=%s -> %r'
-                                % (self._click_calls, zone, (text or '')[:18]))
+                self._log_input('pet_click #%d zone=%s ry=%s -> %r'
+                                % (self._click_calls, zone,
+                                   ('%.3f' % ry) if isinstance(ry, (int, float)) else '?',
+                                   (text or '')[:18]))
                 return {'text': text or '', 'emotion': emotion or 'idle'}
             self._log_input('pet_click #%d zone=%s -> NO HANDLER'
                             % (self._click_calls, zone))

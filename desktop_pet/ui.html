@@ -1275,13 +1275,33 @@
     }
 
     // 点击落在角色的哪一段。Q 版坐姿：上面是头，中间是身体，下面是她趴着的桌面。
+    //
+    // ⚠️ 边界不是拍脑袋的"三分画布"，是**量出来的**（0.3.36，
+    // live2d_probe/measure_region.py 读运行中桌宠的窗口 region 实测）：
+    //   * 角色实际画在 canvas ry 0.11~0.83（角色卡就是按这个外接框贴的，
+    //     卡 = y 202~353 / canvas y 179~390）—— canvas 最底部 17% 根本没有角色像素；
+    //   * 旧边界 desk = ry>=0.85，整条带落在角色卡**下缘之外**的缝隙里，
+    //     而缝隙不在窗口 region 内 → 点了直接穿透到下层窗口。
+    //     也就是说 desk 台词一条都触发不了，点桌子只能得到 body 的台词
+    //     （用户实测 09:03:05 pet_click #1 zone=body 就是这么来的）。
+    //   * head/body 边界 0.45 保持不变（Q 版大头，头部约占上半 48%，没人抱怨过）。
+    // 不确定桌面上沿画在哪一行时，点一下桌宠、看日志里的 ry 值就能校准
+    // （pet_click 现在带 ry 落日志）。
+    var ZONE_HEAD_MAX = 0.45;   // ry < 这个 = head
+    var ZONE_DESK_MIN = 0.62;   // ry >= 这个 = desk（桌子是贴图里最宽的梯形，
+                                // 占角色下半 ~29%；量法见 measure_region.py）
+
+    function zoneFromRatio(ry) {
+      if (ry < ZONE_HEAD_MAX) return 'head';
+      if (ry < ZONE_DESK_MIN) return 'body';
+      return 'desk';
+    }
+
     function zoneAt(clientY) {
       if (!live2d.ready || !live2d.app) return 'body';
       var rect = live2d.app.canvas.getBoundingClientRect();
       var ry = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
-      if (ry < 0.45) return 'head';
-      if (ry < 0.85) return 'body';
-      return 'desk';
+      return zoneFromRatio(ry);
     }
 
     var clickBusy = false;
@@ -1294,8 +1314,16 @@
       if (!api || !api.pet_click) return;
       clickBusy = true;
       setTimeout(function() { clickBusy = false; }, 600);   // 防手抖连点
+      // ry 一起上报：分区边界要是再需要校准，日志里直接有"你点的那一下
+      // 落在 canvas 的百分之几"，不用再起探针量
+      var ryLog = -1;
       try {
-        Promise.resolve(api.pet_click(zoneAt(e.clientY))).then(function(res) {
+        var _rect = live2d.app && live2d.app.canvas &&
+                    live2d.app.canvas.getBoundingClientRect();
+        if (_rect && _rect.height > 0) ryLog = (e.clientY - _rect.top) / _rect.height;
+      } catch (err) {}
+      try {
+        Promise.resolve(api.pet_click(zoneAt(e.clientY), ryLog)).then(function(res) {
           if (!res || !res.text) return;
           showBubble(res.text, false);
           if (res.emotion) setEmotion(res.emotion);
