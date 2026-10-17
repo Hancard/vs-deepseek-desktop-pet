@@ -54,3 +54,7 @@ _*
 # 用户机器上跑出来的原始日志备份（含本机路径与 pid）
 log_user_run_*.txt
 live_alive.txt
+
+# 探针产物（每次跑都会重写，量完读完就没用了）
+zone_profile.txt
+region_profile.txt

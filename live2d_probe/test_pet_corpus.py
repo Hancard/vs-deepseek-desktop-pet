@@ -86,6 +86,18 @@ def snapshot(path):
 
 REAL_BEFORE = {p: snapshot(p) for p in (REAL_CORPUS, REAL_SETTINGS)}
 
+# H 段要用：测试**开始前**真实设置文件里有没有 openCorpusSeq。
+# 它是「编辑语料」功能的正常产物 —— 用户用过一次就会写在里面（0.3.36 实锤：
+# 跑测试时用户文件里就有 "openCorpusSeq": 1，把"文件里不许有"这条断言打红了）。
+# 所以正确的断言是"测试没让它**新出现**"，不是"文件里不许有"。
+_real_had_seq_before = False
+if os.path.exists(REAL_SETTINGS):
+    try:
+        _real_had_seq_before = ('openCorpusSeq' in
+                                io.open(REAL_SETTINGS, encoding='utf-8').read())
+    except OSError:
+        pass
+
 for p in (TMP_CORPUS, TMP_SETTINGS, TMP_LOG, TMP_CORPUS + '.tmp',
           TMP_SETTINGS + '.tmp'):
     try:
@@ -604,8 +616,9 @@ for p in (REAL_CORPUS, REAL_SETTINGS):
     check('未被创建/修改：%s' % os.path.basename(p),
           snapshot(p) == REAL_BEFORE[p],
           'before=%s after=%s' % (REAL_BEFORE[p], snapshot(p)))
-check('真实设置文件里没有多出 openCorpusSeq',
-      (not os.path.exists(REAL_SETTINGS))
+check('真实设置文件里没有**新出现** openCorpusSeq（测试前就有 = 用户正常状态）',
+      _real_had_seq_before
+      or (not os.path.exists(REAL_SETTINGS))
       or 'openCorpusSeq' not in io.open(REAL_SETTINGS, encoding='utf-8').read())
 
 out('')
