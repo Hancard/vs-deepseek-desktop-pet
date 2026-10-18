@@ -1,5 +1,80 @@
 # Change Log
 
+## [0.3.37] — 2026-10-18
+
+### Fixed
+
+- **畸形 `Content-Length` 会把服务端线程永久挂死（可静默累积的泄漏）。**
+  `self.rfile.read(int(Content-Length))` 只兜了 `TypeError/ValueError`：
+  - 负数 → `read(-1)` 是 **readall** 语义，一直读到 EOF；而客户端发完请求头
+    是在**等响应**、不会关连接 ⇒ 线程永久阻塞；
+  - 虚大（声明 1000 只发 20）→ `read(1000)` 阻塞等收满 ⇒ 同样挂死。
+
+  两者**都不抛异常**（socket 没设读超时），`handle_error` 不会被调用、日志一行
+  都没有。实测（修复前）：连发 5 次 `Content-Length: -1` 且保持连接 → 进程线程数
+  从 2 涨到 7，之后再也没退过；每个泄漏都带走一个 socket 句柄。
+  修：统一走 `AiriHandler._read_body()` —— 先夹 `0..1MB`（越界 400），再加 5 秒
+  读超时挡"声明合法但少发"，读完把超时恢复成阻塞（SSE 不能带着超时跑）。
+  ⚠️ 四处 `Content-Length` 里第 4 处（`_cors_guard` 那个 `while remaining > 0`
+  循环）负数天然进不去，**本来就是安全的**，已单独写进回归防止被误删。
+
+- **超大 `Last-Event-ID` 让 SSE 连接永久饿死。** `after_seq` 只做 `int()`，
+  不钳上界。`_seq` 是进程级单调计数且**重启归零**，客户端带一个比当前 `_seq`
+  更大的 id 时 replay 必然为空，而 `last_seq` 就停在那个巨大值上 ⇒ 此后 `_seq`
+  得涨到 `after_seq+1` 才可能有消息被选出，其间一条都收不到；循环外层是
+  `except Exception: pass`，日志零痕迹。
+  实测（修复前）：同样推 3 条消息，全新连接收到 **14 条**，带
+  `Last-Event-ID: 99999999` 的那条收到 **0 条**。
+  修：`after_seq` 钳到 `max(0, min(after_seq, _seq))`（在 `queue_lock` 内读）。
+
+- **拖过一次之后桌宠会一直粘着鼠标。** `dragging` 只有 `document.mouseup`
+  一条复位路径，而 `move_window` 是跨桥异步的（JS → pywebview → Python →
+  `ctypes.MoveWindow`），窗口跟不上光标 —— 快速甩动、拖到屏幕边缘（Python 侧
+  `clamp_to_virtual_screen` 把窗口卡住而光标继续走）、拖拽中 Alt+Tab —— 松手
+  那一刻光标常常已在窗口之外，`mouseup` 被桌面/别的窗口吃掉，`dragging` 就
+  **永远是 true**。之后不按任何鼠标键，只要光标经过桌宠，`mousemove` 照常
+  `move_window`。
+  修：改用 pointer events，按下时 `setPointerCapture` 把后续指针事件锁到
+  `petArea`（光标甩出窗口也收得到 `pointerup`）；再叠三道兜底 ——
+  `pointermove` 里 `buttons === 0` 复位、`pointercancel` 复位、`window blur` 复位。
+
+- **扩展侧非法端口让「启动桌宠」静默失效。**
+  `Number(process.env.AIRI_STANDALONE_PORT) || 19876` 只兜了 NaN/0，没有
+  `0~65535` 范围校验。而 `http.get` 对越界端口是**同步抛** `ERR_SOCKET_BAD_PORT`
+  （实测 node：99999 / -1 / 70000 三个值都是同步抛，不是 error 事件），发生在
+  `checkStandaloneAlive()` 那个**没有 try/catch** 的 Promise executor 里 →
+  Promise reject → `launchStandalonePet` 在它唯一那个 try **之外**抛出：桌宠
+  永远拉不起来、连一条报错都没有。`AIRI_STANDALONE_PORT` 是 `.env.example`
+  明示支持的官方配置项。
+  修：端口夹紧到 `[1, 65535]`；`checkStandaloneAlive` 的 `http.get` 包 try/catch
+  （`postJsonToPet` 早就有这层，这是漏掉的另一半）。
+
+### Tests
+
+- `live2d_probe/test_pet_body_guard.py`（22 条）—— A 段静态契约（含"调用方没有
+  漏网裸读"的穷举）、B 段行为（真的收到 400、线程数不涨、读超时真生效）、
+  C 段留痕、D 段 SSE 续传语义。判断力已验证：对 0.3.36 是 **16 条 FAIL**。
+- `live2d_probe/test_drag_state.py`（19 条）—— A 段把状态机抽出来配最小 DOM stub
+  在 node 里真跑，用 `move_window` 调用次数这个**副作用**判定有没有收手；
+  B 段钉死三道兜底。对 0.3.36 是 **21 条 FAIL**（整段抽不出来）。
+- `live2d_probe/test_ext_port_guard.py`（14 条）—— 13 个人工构造的端口值逐个人喂；
+  带**反证**（旧写法确实放行 `-1 / 65536 / 99999 / 70000` 四个越界值，证明这条
+  校验不是多余的）；B 段坐实 `http.get` 同步抛；C 段查编译产物同步。
+  对 0.3.36 是 **10 条 FAIL**。
+- 全量回归 26/26 通过。
+
+### 顺带确认没问题的（免得重复查）
+
+- `python_backend/response_generator.py`：外部输入的类型加固（`error_count`
+  的 `int()`、`sample_errors` 的字符串/标量归一化、占位符默认值）都在。
+- `desktop_pet/live2d_assets.py`：`check_assets()` 的"永不抛异常"契约、
+  `ensure_core` 的"可用 = 落点上有合法文件"（复制而非就地使用）、CDN 下载的
+  内容校验（长度 + `Live2DCubismCore` 符号）—— 都对。
+- `desktop_pet/main.py`（旧入口）：`_after_window_ready` 的重试循环有 deadline，
+  调的两个函数内部各自兜住异常只返回 `(ok, detail)`。
+- SSE 消息队列：`MAX_QUEUE_SIZE=200` 的裁剪在 `queue_lock` 内、`append` 之后，
+  两处遍历也都在锁内且生成新列表 —— 没有"边遍历边改"。
+
 ## [0.3.36] — 2026-10-17
 
 > 用户反馈：「desk 区域点了等同于 body，调整一下各自的触发区」。
