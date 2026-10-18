@@ -57,8 +57,19 @@ let extensionRoot = '';
  */
 const supportedLanguageIds = new Set(['c', 'cpp', 'python']);
 
-/** 独立桌宠服务器 (standalone.py) 端口（可用环境变量 AIRI_STANDALONE_PORT 覆盖） */
-const STANDALONE_PORT = Number(process.env.AIRI_STANDALONE_PORT) || 19876;
+/**
+ * 独立桌宠服务器 (standalone.py) 端口（可用环境变量 AIRI_STANDALONE_PORT 覆盖）
+ *
+ * ⚠️ 必须做 0~65535 的范围校验：http.get 对越界端口是**同步抛**
+ * `ERR_SOCKET_BAD_PORT`（实测 node：99999 / -1 / 70000 三个值都是同步抛，
+ * 不是 error 事件）。而它发生在 Promise executor 里 → Promise reject →
+ * launchStandalonePet 静默失败（抛点在它唯一那个 try 之外），用户点「启动
+ * 桌宠」什么都不会发生、连一条报错都没有。
+ */
+const STANDALONE_PORT = (() => {
+	const n = Number(process.env.AIRI_STANDALONE_PORT);
+	return Number.isInteger(n) && n > 0 && n < 65536 ? n : 19876;
+})();
 
 /** 桌宠服务器健康状态缓存（避免每次诊断变化都探测） */
 let standaloneHealthy = false;
@@ -522,10 +533,20 @@ async function checkStandaloneAlive(): Promise<boolean> {
 	if (now - lastHealthCheckAt < HEALTH_CHECK_INTERVAL_MS) { return standaloneHealthy; }
 	lastHealthCheckAt = now;
 	standaloneHealthy = await new Promise<boolean>((resolve) => {
-		const req = http.get(
-			{ hostname: '127.0.0.1', port: STANDALONE_PORT, path: '/ping', timeout: 600 },
-			(res) => { res.resume(); resolve(res.statusCode === 200); }
-		);
+		// ⚠️ 必须包 try/catch：http.get 对非法参数是**同步抛**（不是 error 事件），
+		// 在 Promise executor 里抛出会让整个 await 炸出去。STANDALONE_PORT 已经
+		// 做过范围校验，但 hostname / path 这类参数将来若变成可配置，同样会踩。
+		// 对照：postJsonToPet 早就有这层保护，这里是同一类问题的另一半。
+		let req: http.ClientRequest;
+		try {
+			req = http.get(
+				{ hostname: '127.0.0.1', port: STANDALONE_PORT, path: '/ping', timeout: 600 },
+				(res) => { res.resume(); resolve(res.statusCode === 200); }
+			);
+		} catch {
+			resolve(false);
+			return;
+		}
 		req.on('error', () => resolve(false));
 		req.on('timeout', () => { req.destroy(); resolve(false); });
 	});
