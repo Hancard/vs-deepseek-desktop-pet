@@ -13,6 +13,7 @@ import os
 import json
 import random
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -447,6 +448,13 @@ def _origin_allowed(origin):
 # ---------------------------------------------------------------------------
 MAX_QUEUE_SIZE = 200
 SSE_REPLAY_COUNT = 20   # 新连接重播最近的消息数（含启动问候）
+
+# 请求体上限与读超时：挡住"畸形 Content-Length 把 handler 线程永久挂死"
+# （详见 AiriHandler._read_body 的注释）。桌宠的消息最大也就几 KB，1 MB 是
+# 留了几个数量级的余量；5 秒足够本机任何正常请求把 body 发完。
+MAX_BODY_BYTES = 1 << 20
+BODY_READ_TIMEOUT_SEC = 5.0
+
 sse_queue = []          # [(seq, json_str)]
 _seq = 0
 queue_lock = threading.Lock()
@@ -615,6 +623,61 @@ class AiriHandler(BaseHTTPRequestHandler):
         if origin and _origin_allowed(origin):
             self.send_header('Access-Control-Allow-Origin', origin)
 
+    def _read_body(self):
+        """读请求体。**返回 None 表示已经回过响应了，调用方直接 return。**
+
+        ⚠️ 为什么不能直接 `self.rfile.read(int(Content-Length))`：
+
+        ① 负数 —— `read(-1)` 是 **readall** 语义，会一直读到 EOF。而客户端
+           发完请求头是在**等响应**的，不会主动关连接 ⇒ 这个 handler 线程
+           永久挂死。0.3.37 实测：连发 5 次 `Content-Length: -1` 并保持连接，
+           进程线程数从 2 涨到 7，之后再也没退过。
+        ② 虚大 —— 声明 1000 字节只发 20，`read(1000)` 阻塞等收满 ⇒ 同样挂死。
+
+        两者**都不抛异常**（socket 没设读超时，就是安静地等着），所以
+        handle_error 不会被调用、日志一行都没有 —— 是能静默累积的线程 +
+        socket 泄漏。修法两道：先夹范围（负数/超限 400），再加读超时（挡
+        "声明合法但少发"）。
+
+        ⚠️ 四处 Content-Length 里的第 4 处（_cors_guard 里那个）用的是
+        `while remaining > 0` 循环，负数天然进不去，**本来就是安全的**，
+        所以只在这里统一另外三处（/push、/event、/settings）。
+        """
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except (TypeError, ValueError):
+            self.send_response(400)
+            self.end_headers()
+            return None
+        if length < 0 or length > MAX_BODY_BYTES:
+            log('[airi-http] rejected body: Content-Length=%d (allowed 0..%d)'
+                % (length, MAX_BODY_BYTES))
+            self.send_response(400)
+            self.end_headers()
+            return None
+        if length == 0:
+            return ''
+        # 挡"声明合法但少发"：读超时到点就 400 收工，不让线程挂下去
+        try:
+            self.connection.settimeout(BODY_READ_TIMEOUT_SEC)
+        except OSError:
+            pass
+        try:
+            raw = self.rfile.read(length)
+        except (socket.timeout, TimeoutError, OSError) as exc:
+            log('[airi-http] body read failed (%s): %r'
+                % (type(exc).__name__, exc))
+            self.send_response(400)
+            self.end_headers()
+            return None
+        finally:
+            # SSE 长连接不能带着读超时跑，读完必须恢复成阻塞
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
+        return raw.decode('utf-8', errors='replace')
+
     def do_GET(self):
         if not self._cors_guard():
             return
@@ -634,6 +697,18 @@ class AiriHandler(BaseHTTPRequestHandler):
                 after_seq = int(self.headers.get('Last-Event-ID') or 0)
             except (TypeError, ValueError):
                 after_seq = 0
+            # ⚠️ 必须把上界钳到当前 _seq，否则这条连接会被**永久饿死**：
+            # _seq 是进程级单调计数且**重启归零**，客户端带一个比当前 _seq
+            # 更大的 id 时，下面的 replay 必然为空，而 last_seq 就停在那个
+            # 巨大值上 —— 此后 _seq 得一路涨到 after_seq+1 才可能有消息被
+            # 选出，其间这条连接一条都收不到，而且因为循环外层是
+            # `except Exception: pass`，日志里一行痕迹都没有。
+            # 0.3.37 实测：同样推 3 条消息，全新连接收到 14 条，带
+            # `Last-Event-ID: 99999999` 的那条收到 **0 条**。
+            # 现实触发：持有上一次进程遗留 id 的客户端（旧页面残留、排障脚本）
+            # 重连后就静默断流。
+            with queue_lock:
+                after_seq = max(0, min(after_seq, _seq))
             last_seq = after_seq   # 轮询基线从续传点起步：replay 为空时若停在 0，
                                    # 下面的轮询循环会把整个队列再发一遍（实测踩过）
             try:
@@ -677,13 +752,9 @@ class AiriHandler(BaseHTTPRequestHandler):
         if not self._cors_guard():
             return
         if self.path in ('/push', '/diagnostics'):
-            try:
-                length = int(self.headers.get('Content-Length', 0))
-            except (TypeError, ValueError):
-                self.send_response(400)
-                self.end_headers()
+            body = self._read_body()
+            if body is None:
                 return
-            body = self.rfile.read(length).decode('utf-8', errors='replace')
             try:
                 msg = json.loads(body)
             except Exception:
@@ -752,16 +823,12 @@ class AiriHandler(BaseHTTPRequestHandler):
                 push_message('chatMessage', msg.get('message', body), 'idle')
             self._json_response({'status': 'pushed'})
         elif self.path == '/event':
-            try:
-                length = int(self.headers.get('Content-Length', 0))
-            except (TypeError, ValueError):
-                self.send_response(400)
-                self.end_headers()
+            body = self._read_body()
+            if body is None:
                 return
-            # decode 必须带 errors='replace'（与 /push 一致）：非 UTF-8 的 body
-            # 会让 decode 抛 UnicodeDecodeError，而它原先在 try 之外 ——
-            # 请求直接断连，日志里连一条 /event parse failed 都留不下。
-            body = self.rfile.read(length).decode('utf-8', errors='replace')
+            # decode 已在 _read_body 里用 errors='replace' 做过（与 /push 一致）：
+            # 非 UTF-8 的 body 会让 decode 抛 UnicodeDecodeError，而它原先在
+            # try 之外 —— 请求直接断连，日志里连一条 /event parse failed 都留不下。
             try:
                 msg = json.loads(body)
                 # 顶层不是对象时 msg.get 会 AttributeError → 被下面的 except
@@ -811,13 +878,9 @@ class AiriHandler(BaseHTTPRequestHandler):
         elif self.path == '/settings':
             # 写设置（右键菜单「检测周期」）。只改这一个键，值一律夹到
             # [DETECT_MIN_SEC, DETECT_MAX_SEC]；坏输入不猜、直接 400。
-            try:
-                length = int(self.headers.get('Content-Length', 0))
-            except (TypeError, ValueError):
-                self.send_response(400)
-                self.end_headers()
+            body = self._read_body()
+            if body is None:
                 return
-            body = self.rfile.read(length).decode('utf-8', errors='replace')
             try:
                 msg = json.loads(body)
             except Exception:
