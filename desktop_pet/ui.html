@@ -1207,32 +1207,77 @@
     }
 
     // ============ 拖拽移动 + 点击互动 ============
-    // 两者共用同一次 mousedown：拖拽是"按下并移动"，点击是"按下后原地松开"。
+    // 两者共用同一次按下：拖拽是"按下并移动"，点击是"按下后原地松开"。
     // 不区分的话，每次想把窗口拖走都会顺手触发一次点击台词。
+    //
+    // ⚠️ 0.3.37 —— 这套状态机原来是 mouse 事件，dragging **只有
+    // document.mouseup 一条复位路径**。而 move_window 是跨桥异步的
+    // （JS → pywebview → Python → ctypes.MoveWindow），窗口跟不上光标：
+    // 快速甩动、或拖到屏幕边缘（Python 侧 clamp_to_virtual_screen 会把窗口
+    // 卡住而光标继续走）、或拖拽中 Alt+Tab 被别的窗口盖住 —— 松手那一刻光标
+    // 常常已经在窗口之外，mouseup 被桌面/别的窗口吃掉，dragging 就**永远是
+    // true**。之后不按任何鼠标键，只要光标经过桌宠，mousemove 照常
+    // move_window，桌宠像被磁铁吸住一样跟着鼠标跑（"拖了一次就一直粘着"）。
+    //
+    // 根治办法是 **pointer capture**：按下时把后续所有 pointer 事件锁到
+    // petArea，光标甩到窗口外（甚至屏幕外）也照样收得到 pointerup。
+    // 再叠两道兜底：pointermove 里 buttons===0 复位（捕获没生效时也治得住
+    // "粘鼠标"这个症状）、pointercancel 与 window blur 复位。
     var dragging = false, dragStartX = 0, dragStartY = 0, winStartX = 0, winStartY = 0;
     var downX = 0, downY = 0, moved = false;
+    var dragPointerId = null;   // 已捕获的指针 id（捕获失败则为 null）
     var CLICK_SLOP = 5;   // 移动不超过这个像素数才算"点击"
 
-    petArea.addEventListener('mousedown', function(e) {
+    function endDrag(e) {
+      // 原地松开 = 点击；拖过就不算
+      if (dragging && !moved && e) { handlePetClick(e); }
+      dragging = false;
+      if (dragPointerId !== null) {
+        try {
+          if (petArea.hasPointerCapture && petArea.hasPointerCapture(dragPointerId)) {
+            petArea.releasePointerCapture(dragPointerId);
+          }
+        } catch (err) {}
+        dragPointerId = null;
+      }
+    }
+
+    petArea.addEventListener('pointerdown', function(e) {
       if (e.button !== 0) return;
       dragging = true;
       moved = false;
       downX = e.clientX; downY = e.clientY;
       dragStartX = e.screenX; dragStartY = e.screenY;
       winStartX = window.screenX || 0; winStartY = window.screenY || 0;
+      // 关键一步：把后续 pointer 事件锁到 petArea。没有它，光标跑出窗口后
+      // 就再也收不到 up —— 那正是"桌宠粘鼠标"的根因。
+      dragPointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+      if (dragPointerId !== null) {
+        try {
+          petArea.setPointerCapture(dragPointerId);
+        } catch (err) {
+          dragPointerId = null;   // 捕获失败：靠下面 buttons===0 那道兜底
+        }
+      }
       if (window.pywebview && window.pywebview.api) {
         try {
           var p = window.pywebview.api.get_position();
           if (p && typeof p.then === 'function') {
-            p.then(function(pos) { winStartX = pos[0]; winStartY = pos[1]; }, function() {});
+            p.then(function(pos) {
+              winStartX = (pos && pos[0]) || winStartX;
+              winStartY = (pos && pos[1]) || winStartY;
+            }, function() {});
           } else { winStartX = p[0] || winStartX; winStartY = p[1] || winStartY; }
         } catch (err) {}
       }
       e.preventDefault();
     });
 
-    document.addEventListener('mousemove', function(e) {
+    petArea.addEventListener('pointermove', function(e) {
       if (!dragging) return;
+      // 兜底：捕获没生效（或出了别的岔子）时，左键已经松开就立刻收手。
+      // 这一条正好治"粘鼠标"的症状 —— 光标回到窗口上时 buttons 必为 0。
+      if (e.buttons === 0) { dragging = false; return; }
       if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > CLICK_SLOP) moved = true;
       if (!moved) return;      // 还没越过阈值就别急着挪窗口
       try {
@@ -1242,10 +1287,11 @@
       e.preventDefault();
     });
 
-    document.addEventListener('mouseup', function(e) {
-      if (dragging && !moved) handlePetClick(e);
-      dragging = false;
-    });
+    petArea.addEventListener('pointerup', function(e) { endDrag(e); });
+    // 系统抢走指针（触摸被取消、窗口失焦）时也要收手
+    petArea.addEventListener('pointercancel', function() { endDrag(null); });
+    // 最后一道：Alt+Tab 走开时别把拖拽状态留在半路
+    window.addEventListener('blur', function() { if (dragging) { endDrag(null); } });
 
     // ---- 命中判定：读 canvas 的 alpha ----
     // 这个模型没有声明 Cubism HitAreas，引擎的 hitTest() 用不了，
