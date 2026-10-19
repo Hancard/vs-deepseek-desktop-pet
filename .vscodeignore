@@ -17,3 +17,17 @@ live2d_probe/**
 desktop_pet/_clamp_test.txt
 desktop_pet/_probe_*.html
 *.vsix
+# Live2D Cubism Core 是**专有许可，不可再分发**（.gitignore 里也排除了它，
+# 模块头 live2d_assets.py 也写着同样的约束）—— vsce 只认 .vscodeignore，
+# 不看 .gitignore，所以漏了这一行它就被打进 VSIX 了（0.3.38 的包里实测
+# 有 207,155 字节的 live2dcubismcore.min.js）。
+# 运行时缺口由 live2d_assets.ensure_core() 补：首次启动从官方 CDN 取一份，
+# 并缓存到 ~/.dsh/pets/.runtime/，之后重装扩展也不必再下载。
+desktop_pet/assets/live2d/vendor/live2dcubismcore.min.js
+# 测试产物 / 内部文档 / 模板文件不进 VSIX
+# （注意 python_backend/corpus.py 与 response_generator.py **是运行时必需的**，
+#   standalone.py 会把 ../python_backend 插进 sys.path 后 import 它们）
+out/test/**
+方案B_*.md
+.env.example
+python_backend/main.py
