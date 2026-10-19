@@ -101,6 +101,8 @@ DETECT_MAX_SEC = 60       # 用户指定：最长 60 秒
 DETECT_DEFAULT_SEC = 30   # 与扩展 petTick 的默认值保持一致
 
 DEFAULT_PORT = 19876      # 与扩展侧 extension.ts 的默认值必须一致
+PORT_MIN = 1
+PORT_MAX = 65535
 
 
 def resolve_port():
@@ -115,9 +117,16 @@ def resolve_port():
     同一口径，否则"环境变量被设了个怪值"时表现完全对不上。
     """
     try:
-        return int(os.environ.get('AIRI_STANDALONE_PORT', '') or DEFAULT_PORT)
+        port = int(os.environ.get('AIRI_STANDALONE_PORT', '') or DEFAULT_PORT)
     except (TypeError, ValueError):
         return DEFAULT_PORT
+    if not (PORT_MIN <= port <= PORT_MAX):
+        log('[airi-standalone] AIRI_STANDALONE_PORT=%r out of range '
+            '[%d..%d], fallback to %d'
+            % (os.environ.get('AIRI_STANDALONE_PORT'), PORT_MIN, PORT_MAX,
+               DEFAULT_PORT))
+        return DEFAULT_PORT
+    return port
 
 
 def clamp_detect_sec(value):
