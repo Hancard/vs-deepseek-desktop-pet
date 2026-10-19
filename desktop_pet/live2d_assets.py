@@ -48,6 +48,34 @@ CORE_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 MIN_CORE_BYTES = 50_000
 MIN_VENDOR_BYTES = 100_000
 
+# 用户侧缓存：跨重装/升级保住那份 core（见 _mirror_to_user_cache）
+USER_CACHE_DIR = Path.home() / '.dsh' / 'pets' / '.runtime'
+USER_CACHE_CORE = USER_CACHE_DIR / 'live2dcubismcore.min.js'
+
+
+def _mirror_to_user_cache(src: Path) -> None:
+    """把落点上这份 core 顺手存一份到 ~/.dsh/pets/.runtime/（0.3.39）。
+
+    ⚠️ 那个目录在 ensure_core 里本来就是两个**候选来源**之一，但代码里从来
+    没有任何地方往它写 —— 只被读、从没被写，等于一条死路径。后果：core 是
+    专有许可、不能随 VSIX 分发，而每次**重装/升级扩展**都会把安装副本整个
+    换掉，落点上的 core 随之消失；于是又要联网下载一次，离线环境下直接
+    降级成立绘（用户看到的就是"升级完之后角色变回图片了"）。
+
+    缓存一次之后，ensure_core 的第一个候选就能命中，重装也能立刻恢复。
+    失败无所谓 —— 这里只是缓存，主流程不受影响。
+    """
+    try:
+        if not _core_ok(src):
+            return
+        if _core_ok(USER_CACHE_CORE):
+            return
+        USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        USER_CACHE_CORE.write_bytes(src.read_bytes())
+        print(f'[airi-live2d] cubism core mirrored -> {USER_CACHE_CORE}')
+    except OSError as exc:
+        print(f'[airi-live2d] cannot mirror core to user cache: {exc!r}')
+
 
 def enabled() -> bool:
     """AIRI_LIVE2D=0 时强制关闭（退回原来的图片/CSS 角色）。"""
@@ -131,6 +159,7 @@ def ensure_core(path: Path = CORE_PATH, timeout: int = 30) -> bool:
         if _core_ok(src):
             # 落点已经有可用的就不必再复制；否则把它搬到位（这就是"跳过下载"）
             if _core_ok(path) or _cache_core_from(src, path):
+                _mirror_to_user_cache(path)
                 return True
         elif src.is_file():
             print(f'[airi-live2d] AIRI_CUBISM_CORE too small '
@@ -139,6 +168,7 @@ def ensure_core(path: Path = CORE_PATH, timeout: int = 30) -> bool:
             print(f'[airi-live2d] AIRI_CUBISM_CORE not found: {env_core}')
 
     if _core_ok(path):
+        _mirror_to_user_cache(path)
         return True
 
     try:
@@ -154,6 +184,7 @@ def ensure_core(path: Path = CORE_PATH, timeout: int = 30) -> bool:
     ):
         if _core_ok(candidate):
             if _cache_core_from(candidate, path):
+                _mirror_to_user_cache(path)
                 return True
             break               # 复制失败多半是文件系统的问题，换个源也一样
 
@@ -185,12 +216,23 @@ def ensure_core(path: Path = CORE_PATH, timeout: int = 30) -> bool:
         print(f'[airi-live2d] cannot cache cubism core: {exc!r}')
         return False
     print(f'[airi-live2d] cubism core cached ({len(blob)} bytes) -> {path}')
+    _mirror_to_user_cache(path)
     return True
 
 
 def _core_ok(path: Path) -> bool:
+    """体积**和**内容都要过关。
+
+    ⚠️ 内容校验不能只对下载的那份做（0.3.39）：以前这里只查 is_file() +
+    st_size，而下载路径还会查 `b'Live2DCubismCore' in blob`。于是本地已有的
+    一份"体积够大但不是 core"的文件（错误页、别处的 js、被截断后又补长
+    的碎片）会被判成可用 → Live2D 初始化按成功走、实际渲染失败，而降级
+    原因在日志里根本看不出来。两条路径必须用同一个标准。
+    """
     try:
-        return path.is_file() and path.stat().st_size >= MIN_CORE_BYTES
+        if not path.is_file() or path.stat().st_size < MIN_CORE_BYTES:
+            return False
+        return b'Live2DCubismCore' in path.read_bytes()
     except OSError:
         return False
 
