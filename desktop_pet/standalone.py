@@ -100,6 +100,25 @@ DETECT_MIN_SEC = 1        # 用户指定：最短 1 秒
 DETECT_MAX_SEC = 60       # 用户指定：最长 60 秒
 DETECT_DEFAULT_SEC = 30   # 与扩展 petTick 的默认值保持一致
 
+DEFAULT_PORT = 19876      # 与扩展侧 extension.ts 的默认值必须一致
+
+
+def resolve_port():
+    """解析监听端口，坏输入 / 越界一律回落 DEFAULT_PORT（0.3.39）。
+
+    ⚠️ 为什么要夹范围：端口 **0** 是合法整数，绑 0 = 让内核随机分配一个
+    端口，绑定**成功** → server_ready 被 set → 启动守卫不触发 → 窗口照常
+    弹出。但 load_html 往页面里注入的是 `http://127.0.0.1:0`，页面里的
+    SSE / fetch 全部打到一个不存在的端口；扩展却仍往 19876 推。桌宠站得
+    住、不说话、菜单读不到设置，而日志里一条异常都没有（实测：绑 0 拿到
+    2106）。扩展侧 0.3.37 已经夹过 [1,65535]，这边一直没夹 —— 两头必须
+    同一口径，否则"环境变量被设了个怪值"时表现完全对不上。
+    """
+    try:
+        return int(os.environ.get('AIRI_STANDALONE_PORT', '') or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+
 
 def clamp_detect_sec(value):
     """把任意输入收敛成 [1, 60] 整数秒；坏输入回落默认值。
@@ -575,6 +594,7 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reas
         push_message('chatMessage', '哼，全部修好了…算你厉害。', 'happy')
 
 
+
 # ---------------------------------------------------------------------------
 # HTTP 服务器
 # ---------------------------------------------------------------------------
@@ -1012,12 +1032,11 @@ def _merge_webview2_args(prev: str) -> str:
     kept.append('--disable-features=' + ','.join(sorted(feats)))
     return ' '.join(kept)
 
-def main():
+def main(port=None):
     global _api_ref
-    try:
-        PORT = int(os.environ.get('AIRI_STANDALONE_PORT', '') or 19876)
-    except ValueError:
-        PORT = 19876
+    if port is None:
+        port = resolve_port()
+    PORT = port
     server_ready = threading.Event()
     server_thread = threading.Thread(target=start_server, args=(PORT, server_ready), daemon=True)
     server_thread.start()
@@ -1163,6 +1182,18 @@ def main():
         raise
 
 if __name__ == '__main__':
+    # ⚠️ 端口守卫必须在 _init_log() **之前**（0.3.39）：_init_log 是以 'w'
+    # 打开日志的（"每次启动重写，不会无限增长"）。而"已有实例在跑"这件事
+    # 要等 main() 里 start_server 绑定失败才看得出来 —— 于是第二个进程
+    # 先把正在运行的那个实例的全部排障记录清空，再写一行 "already running"
+    # 退出。用户报障时打开日志只剩一句"已退出"，真正的现场已经被抹掉了。
+    # 而且它此后继续 append 到这个被截断的文件里，两个进程的记录混在一起。
+    # 真实例：点两次状态栏按钮 / 扩展重复拉起 / 双击 launch.bat。
+    _port = resolve_port()
+    if _ping_ok(_port):
+        # 注意：这里**故意不截断日志**，也不往里写 —— 那份日志属于还在跑
+        # 的那个进程。
+        sys.exit(0)
     _init_log()
     log('[airi-standalone] --- boot ---')
     # 把"这一轮用的是哪个检测周期"写进日志头：用户改了周期之后，排查
@@ -1184,4 +1215,4 @@ if __name__ == '__main__':
             % (_cs['path'], _cs['exists'], _cs['scenes_from_user'],
                _cs['clicks_from_user'], _cs['dropped'],
                (' error=%s' % _cs['error']) if _cs['error'] else ''))
-    main()
+    main(_port)
