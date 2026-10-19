@@ -1,5 +1,82 @@
 # Change Log
 
+## [0.3.38] — 2026-10-19
+
+### Fixed
+
+- **语料加了注释就整份失效**（`python_backend/corpus.py`）
+  `strip_jsonc` 处理尾随逗号时，向前只跳空白、**不跳注释**。而语料文件头
+  `_FILE_HEADER` 是这么写的：「本文件允许注释和多余的尾逗号」—— 用户照着做
+  （加一条台词 + 在行尾写 `// 新加的`）就正好踩中：注释被剥掉后留下非法的
+  尾逗号，`json.loads` 直接报错，**12 个场景 + 3 个点击分区全部回落内置**，
+  用户改的台词一条不生效。
+  实测（修复前）：加台词 + 行尾注释 → `scenes` 从 12 变 0。修复后 12、新台词生效。
+- **语料存成非 UTF-8 时桌宠起不来**（`corpus.py` + `standalone.py`）
+  `open(..., encoding='utf-8-sig')` 抛的 `UnicodeDecodeError` 是 `ValueError`
+  子类，**不是 `OSError`**，所以从 `except OSError` 旁边穿了出去。取词路径有
+  `except Exception` 兜着（看起来只是"回落内置"），但 `corpus_status()` 没有，
+  而它在启动段是**顶层裸调用**（在 `main()` 之前）→ 进程直接没了。
+  用记事本把语料另存为 ANSI(GBK) / Unicode(UTF-16LE) 即可触发。
+  修：捕获 `UnicodeDecodeError`；`corpus_status()` 自带兜底（排障函数自己不能崩）。
+- **热重载读到坏文件会把上一版完好语料清空**（`corpus.py`）
+  `_read_corpus_file` 出错时无条件 `_cache.update(scenes={})`。编辑器保存语料
+  是"截断 → 原地写"，30 秒的检测周期完全可能落在中间；或语料在网盘/OneDrive
+  下处于仅联机占位状态。原本完好的语料被抹空，且 key 被设成这次失败的
+  `(mtime, size)` —— 只要它不再变就**永远不重试**。
+  修：保留 last-known-good，只更新 key 与 error（留痕照旧，功能不退）。
+- **相对路径立绘让桌宠零提示起不来**（`desktop_pet/common.py`）
+  `find_character_image()` 接受相对路径（README 就是这么教用户写的），而
+  `load_html()` 里 `Path(相对).as_uri()` 抛 `ValueError`；两个调用点都是裸调用，
+  进程一崩，traceback 走 stderr 被扩展以 `stdio:'ignore'` 丢掉 —— 用户点了
+  「启动桌宠」什么都没有，日志文件里一行线索都不留。
+  修：`find_character_image` 返回绝对路径；`load_html` 对坏立绘只降级（退回
+  CSS 角色），读不到 ui.html 时返回 `None`，两个调用点显式判空并落日志。
+  顺带：`resolve()` 对不存在的路径也是成功的，会产出指向空处的 `file://`
+  （页面显示裂图，比降级更难看）→ 补存在性判断。
+- **region 合并丢弃 `CombineRgn` 返回值**（`common.py`）
+  `_merge()` 算出了返回码却被调用点丢掉，而 `kept += 1` 是无条件的。
+  `CombineRgn` 一旦失败（返回 `ERROR=0`，此时 `h_total` 一点没变，仍是空区域），
+  `kept` 却已经 > 0，`if not kept` 这道"不许把空 region 设上去"的防线被绕过 →
+  `SetWindowRgn` 成功装上一个**空区域**：窗口不可见、鼠标完全点不到（连右键
+  菜单都打不开 → 退不出去，只能杀进程）。而且返回 `ok=True`，前端 `silFails`
+  不递增、`silLastKey` 不清，形状又没变 → 错误状态会一直驻留。
+- **`rad` 未钳制 + 异常白名单不全**（`common.py`）
+  圆角矩形的 `ew/eh` 是整段里唯一没钳制的量：`rad=inf` → `int(round(...))` 抛
+  `OverflowError`（不是 `ValueError`）；大到超 `c_long` → ctypes 抛
+  `ArgumentError`。两者都不在白名单里，会逃出去把**已经并好的几十块 region
+  全部作废**，整拍形状白干。修：钳到不超过矩形自身 + 白名单补齐。
+- **`get_position` 是四个桥方法里唯一没兜底的，且 `x or 0` 把坐标 0 当假值**
+  （`common.py` + `ui.html`）窗口已 destroy 后补发一次 pointerdown 就会穿过桥
+  （JS 侧的 rejection handler 是空函数，表现为"这次拖拽跳一下"，日志毫无痕迹）；
+  而 `x or 0` 是假值兜底 —— 窗口真的停在 `x==0`（拖拽钳制允许贴屏幕左/上边缘）
+  时返回 0，JS 侧 `(pos && pos[0]) || winStartX` 把 0 当"没取到"丢掉。
+  修：Python 侧加 try + 用 `None` 判断；JS 侧改 `typeof/isFinite` 判断。
+- **立绘不支持 `.jpg`**（`common.py`）`assets/README.md` 写着支持 PNG/GIF/
+  **JPG**/WebP，代码里候选名只有 png/gif/webp —— 用户把 `character.jpg` 放进
+  `assets/` 会静默退回 CSS 角色，一句警告都没有。
+
+### Tests
+
+- 新增 `test_corpus_jsonc.py`（21 条）：尾逗号+注释的四种写法、非 UTF-8 两种
+  编码（含冷启动与热重载）、坏文件保留 last-known-good 与"修好后能恢复"。
+  判断力已验证：对 0.3.37 是 **11 条 FAIL**。
+- 新增 `test_pet_startup_guard.py`（26 条）：立绘绝对路径/格式、`load_html`
+  降级与判空、`get_position` 的 0 坐标与异常兜底、region 合并契约。
+  判断力已验证：对 0.3.37 是 **19 条 FAIL**。
+- ⚠️ 教训：B 段第一版在异常路径下引用了没被赋值的 `r`，抛 `NameError` 把
+  **后面几条用例整段吞掉** —— 看起来像"GBK 没事"，其实压根没跑。
+  测试里每条用例都必须能独立跑完。
+- 全量回归 **28/28**。
+
+### 顺带确认没问题的（别重复查）
+
+- `common.py` 的 GDI 句柄配对（创建/删除逐条核对，无泄漏）、结构体对齐、
+  `byref` 用法、`SetWindowRgn` 返回值判断 —— 都对
+- 资产服务器路径穿越：17 个载荷（`../`、`..\`、`%2e%2e`、`C:\`、`//?/`、
+  内嵌 NUL）**全部正确拒绝**
+- `get_lines` / `get_click_lines` 的取词路径不会崩（有 `except Exception`）
+- 点击轮换真身 `standalone._pick_click_line`：空池/1 条/2 条都不会死循环或越界
+
 ## [0.3.37] — 2026-10-18
 
 ### Fixed
