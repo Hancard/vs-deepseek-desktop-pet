@@ -352,6 +352,37 @@ def get_emotion(category: str) -> str:
 # ============================================================================
 # JSONC 解析
 # ============================================================================
+def _skip_blanks(text: str, j: int) -> int:
+    """从 j 起跳过空白**和注释**，返回下一个有效字符的下标。
+
+    ⚠️ 尾随逗号的前瞻必须用这个而不是"只跳空白"：0.3.38 之前逗号后面
+    跟注释时，前瞻看到的是 `/` 而不是 `}`/`]`，于是尾随逗号被保留；等
+    注释被剥掉后，JSON 里就剩下 `[..., "b", ]` —— `json.loads` 直接报错，
+    **整份用户语料（12 个场景 + 3 个点击分区）全部回落内置**。
+
+    而文件头 `_FILE_HEADER` 是这么写的：「本文件允许注释和多余的尾逗号」，
+    用户照着做（加一条台词 + 在行尾写个注释说明）就正好踩中。实测：
+    加台词后写 `// 新加的` → scenes 从 12 变 0，用户改的台词一条不生效。
+    """
+    n = len(text)
+    while j < n:
+        ch = text[j]
+        if ch in ' \t\r\n':
+            j += 1
+            continue
+        if ch == '/' and j + 1 < n:
+            if text[j + 1] == '/':
+                k = text.find('\n', j)
+                j = n if k < 0 else k
+                continue
+            if text[j + 1] == '*':
+                k = text.find('*/', j + 2)
+                j = n if k < 0 else k + 2
+                continue
+        break
+    return j
+
+
 def strip_jsonc(text: str) -> str:
     """剥掉 JSONC 的注释与尾随逗号，得到可以被 json.loads 吃下的纯 JSON。
 
@@ -363,7 +394,8 @@ def strip_jsonc(text: str) -> str:
     当成注释（台词里出现 `//` 完全可能，例如 "// TODO 还没写"）：
       · 字符串内：原样复制，处理 \\ 转义，遇 " 才结束
       · 字符串外：`//` 到行尾、`/* */` 到闭合符，整段丢掉
-      · 字符串外的 `,` 若后面只跟空白就遇到 `}` / `]` —— 尾随逗号，丢掉
+      · 字符串外的 `,` 若后面（跳过空白**与注释**）就遇到 `}` / `]`
+        —— 尾随逗号，丢掉。见 `_skip_blanks` 里那条 0.3.38 的实测。
     """
     if text.startswith('\ufeff'):        # BOM：Windows 编辑器存 UTF-8 时常见
         text = text[1:]
@@ -398,10 +430,8 @@ def strip_jsonc(text: str) -> str:
                 i = n if j < 0 else j + 2
                 continue
         if ch == ',':
-            # 尾随逗号：向后跳过空白，若撞上 } 或 ] 就吞掉这个逗号
-            j = i + 1
-            while j < n and text[j] in ' \t\r\n':
-                j += 1
+            # 尾随逗号：向后跳过空白**与注释**，若撞上 } 或 ] 就吞掉这个逗号
+            j = _skip_blanks(text, i + 1)
             if j < n and text[j] in '}]':
                 i += 1
                 continue
@@ -488,7 +518,15 @@ def _read_corpus_file(key):
     try:
         with open(CORPUS_PATH, encoding='utf-8-sig') as fh:
             raw = fh.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # ⚠️ UnicodeDecodeError 是 ValueError 的子类，**不是 OSError** ——
+        # 0.3.38 之前只写 `except OSError`，于是用记事本把语料另存成
+        # ANSI(GBK) / Unicode(UTF-16LE) 之后，异常从这里一路穿出去。
+        # 取词路径（get_lines）有 except Exception 兜着，看起来只是"回落
+        # 内置"；但 corpus_status() 没有兜底，而它在 standalone.py 的启动
+        # 路径上是**顶层裸调用**（在 main() 之前）→ 进程直接没了，桌宠
+        # 根本不出现，且 traceback 走 stderr 被扩展以 stdio:'ignore' 丢掉。
+        # 实测两种编码都抛（0.3.38）。
         return {}, {}, 0, repr(exc)
     try:
         # encoding='utf-8-sig' 已经吃掉 BOM，这里再兜一次手动粘贴的
@@ -532,8 +570,27 @@ def _user_corpus():
             return _cache['scenes'], _cache['clicks'], _cache['error']
     scenes, clicks, dropped, error = _read_corpus_file(key)
     with _cache_lock:
-        _cache.update(key=key, scenes=scenes, clicks=clicks,
-                      error=error, dropped=dropped)
+        if error and (_cache['scenes'] or _cache['clicks']):
+            # ⚠️ 读坏了**不能把上一版好语料抹掉**（0.3.38）。
+            #
+            # 原来这里是无条件 _cache.update(scenes={}, clicks={})：
+            # 编辑器保存语料时是"截断 → 原地写"，桌宠 30 秒的检测周期完全
+            # 可能正好落在中间，读到 0 字节；或者语料在网盘/OneDrive 目录下
+            # 处于仅联机占位状态，open() 干脆失败。这两种情况下旧语料本来
+            # 是完好的，却被清成空 —— 用户看到的是"我写的台词全都不认了"。
+            # 更糟的是 key 会被设成这次失败的 (mtime, size)，只要它不再变就
+            # 永远不重试：语料就这么一直停在内置，直到用户再去动那个文件。
+            #
+            # 保留 last-known-good，只更新 key 与 error：留痕照旧，功能不退。
+            # 注意 scenes/clicks 也要换回旧值 —— 否则缓存里留着好的、
+            # 返回的却是这次读坏的 {}，调用方照样回落内置，等于白保留。
+            _cache.update(key=key, error=error)
+            scenes, clicks = _cache['scenes'], _cache['clicks']
+            _log('[airi-corpus] keep last good corpus (read failed): %s'
+                 % error)
+        else:
+            _cache.update(key=key, scenes=scenes, clicks=clicks,
+                          error=error, dropped=dropped)
     if error:
         # 文件坏了要留痕：否则用户"改了没生效"时完全无从下手
         _log('[airi-corpus] user corpus unreadable (%s) -> built-in lines: %s'
@@ -578,10 +635,22 @@ def get_click_lines(zone: str):
 
 
 def corpus_status():
-    """当前语料来源概况，供启动日志/排障用。"""
-    scenes, clicks, error = _user_corpus()
-    with _cache_lock:
-        dropped = _cache['dropped']
+    """当前语料来源概况，供启动日志/排障用。
+
+    ⚠️ 这个函数**必须自己不抛异常**：它是排障用的，而调用点
+    （standalone.py 启动段）是**顶层裸调用**，在 main() 之前 —— 它一抛，
+    进程就没了，桌宠起不来，而 traceback 走 stderr 被扩展以
+    stdio:'ignore' 丢弃，用户侧零提示（0.3.38）。
+    """
+    try:
+        scenes, clicks, error = _user_corpus()
+    except Exception as exc:      # 排障函数自己崩了是最糟的情况
+        scenes, clicks, error = {}, {}, 'corpus_status: %r' % (exc,)
+    try:
+        with _cache_lock:
+            dropped = _cache['dropped']
+    except Exception:
+        dropped = 0
     return {
         'path': CORPUS_PATH,
         'exists': os.path.exists(CORPUS_PATH),
