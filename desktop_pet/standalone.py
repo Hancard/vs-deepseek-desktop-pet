@@ -623,18 +623,8 @@ class AiriHandler(BaseHTTPRequestHandler):
         # 先把请求体读完再回 403：HTTP/1.0 下服务端随即关连接，若接收缓冲区
         # 里还剩没读的字节，Windows 会发 RST 把刚写出去的响应一起冲掉 ——
         # 浏览器看到的就是"连接被重置"而不是一个干净的 403。
-        try:
-            remaining = int(self.headers.get('Content-Length') or 0)
-        except (TypeError, ValueError):
-            remaining = 0
-        while remaining > 0:
-            try:
-                chunk = self.rfile.read(min(remaining, 65536))
-            except Exception:
-                break
-            if not chunk:
-                break
-            remaining -= len(chunk)
+        # （排空自己也有挂死风险，_drain_body() 内部夹了上限与读超时。）
+        self._drain_body()
         self.send_response(403)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -668,9 +658,14 @@ class AiriHandler(BaseHTTPRequestHandler):
         socket 泄漏。修法两道：先夹范围（负数/超限 400），再加读超时（挡
         "声明合法但少发"）。
 
-        ⚠️ 四处 Content-Length 里的第 4 处（_cors_guard 里那个）用的是
-        `while remaining > 0` 循环，负数天然进不去，**本来就是安全的**，
-        所以只在这里统一另外三处（/push、/event、/settings）。
+        ⚠️ 四处 Content-Length 里的第 4 处（_cors_guard 里那个）走
+        `_drain_body()` —— 它同样要夹上限 + 加读超时，理由见那里的注释。
+        0.3.37 这里原本写的是"while remaining > 0 的循环负数天然进不去，
+        本来就是安全的"：那只论证了①（负数），漏了②（**声明合法但少发**）
+        —— 跨源请求声明 Content-Length: 999999 却一个字节都不发，那个循环
+        在无超时 socket 上安静地等到 EOF，handler 线程被占住、403 永远发
+        不出去。0.3.39 实测：连发 3 条并保持连接，线程数 2→5，客户端
+        3 秒读超时全部 TimeoutError。
         """
         try:
             length = int(self.headers.get('Content-Length', 0))
@@ -706,6 +701,47 @@ class AiriHandler(BaseHTTPRequestHandler):
             except OSError:
                 pass
         return raw.decode('utf-8', errors='replace')
+
+    def _drain_body(self):
+        """把请求体**排空**（不关心内容），给随后的 403 铺路。
+
+        排空是必要的：HTTP/1.0 下服务端随即关连接，接收缓冲区里若还剩没读
+        的字节，Windows 会发 RST 把刚写出去的响应一起冲掉 —— 浏览器看到
+        的就是"连接被重置"而不是一个干净的 403。
+
+        ⚠️ 但排空本身也是一次 read，同样必须夹上限 + 加读超时（0.3.39）：
+        跨域请求的头是**攻击者/失控脚本**发的，声明 999999 字节却一字节
+        不发是完全做得到的（浏览器做不到，raw socket / curl 做得到）。
+        原来的 `while remaining > 0: self.rfile.read(...)` 两条都没有 ——
+        于是一个跨源请求就能永久占住一个 handler 线程，而且那句 403 永远
+        写不出去。实测：连发 3 条并保持连接 → 进程线程数 2→5，客户端
+        3 秒读超时全部超时（收到的不是 403 是 TimeoutError）。
+        """
+        try:
+            remaining = int(self.headers.get('Content-Length') or 0)
+        except (TypeError, ValueError):
+            return
+        if remaining <= 0:
+            return
+        remaining = min(remaining, MAX_BODY_BYTES)
+        try:
+            self.connection.settimeout(BODY_READ_TIMEOUT_SEC)
+        except OSError:
+            pass
+        try:
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (socket.timeout, TimeoutError, OSError):
+            pass
+        finally:
+            # 读完必须恢复成阻塞（SSE 长连接不能带着读超时跑）
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
 
     def do_GET(self):
         if not self._cors_guard():
@@ -977,6 +1013,8 @@ class AiriHandler(BaseHTTPRequestHandler):
         if not _origin_allowed(self.headers.get('Origin')):
             log('[airi-http] blocked cross-origin preflight %s (Origin=%r)'
                 % (self.path, self.headers.get('Origin')))
+            # 与 _cors_guard 同一个理由：先排空再回，否则 RST 会把 403 冲掉
+            self._drain_body()
             self.send_response(403)
             self.end_headers()
             return
