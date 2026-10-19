@@ -1262,12 +1262,18 @@
       if (window.pywebview && window.pywebview.api) {
         try {
           var p = window.pywebview.api.get_position();
+          // ⚠️ 不要用 `pos[0] || winStartX`：坐标**真的可以是 0**（拖拽钳制
+          // 允许窗口贴到屏幕左/上边缘），而 0 是假值 —— 会被当成"没取到"
+          // 丢掉，回退到 window.screenX，于是这一拖的起点错了、窗口跳一下。
+          // 判断必须是"是不是数字"，不是"是不是真值"（0.3.38）。
+          var applyPos = function(pos) {
+            if (!pos) return;
+            if (typeof pos[0] === 'number' && isFinite(pos[0])) winStartX = pos[0];
+            if (typeof pos[1] === 'number' && isFinite(pos[1])) winStartY = pos[1];
+          };
           if (p && typeof p.then === 'function') {
-            p.then(function(pos) {
-              winStartX = (pos && pos[0]) || winStartX;
-              winStartY = (pos && pos[1]) || winStartY;
-            }, function() {});
-          } else { winStartX = p[0] || winStartX; winStartY = p[1] || winStartY; }
+            p.then(applyPos, function() {});
+          } else { applyPos(p); }
         } catch (err) {}
       }
       e.preventDefault();

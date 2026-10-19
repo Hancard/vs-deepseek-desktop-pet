@@ -234,10 +234,28 @@ class WindowAPI:
         return {'ok': True, 'pid': os.getpid()}
 
     def get_position(self):
+        """返回窗口左上角 [x, y]，供拖拽算起点。
+
+        ⚠️ 两个坑（0.3.38）：
+        ① 这是四个对外桥方法里**唯一没有 try/except** 的。窗口已 destroy
+           后前端补发一次 pointerdown、或 pywebview 的 Window.x 在跨线程
+           访问时抛异常 —— 都会直接穿过桥（JS 侧的 rejection handler 是空
+           函数，表现为"这次拖拽跳一下"，日志里毫无痕迹）。
+        ② `x or 0` 是**假值兜底**而不是 None 兜底：窗口真的停在 x==0 时
+           返回 0，而 JS 那边写的是 `(pos && pos[0]) || winStartX` ——
+           0 被当成"没取到"丢掉了。拖拽钳制允许窗口贴到屏幕左/上边缘，
+           x/y 完全可以 ≤ 0，所以这条是真的会踩到。
+        """
         if self._window is None:
             self._log_input('get_position -> no window')
             return [0, 0]
-        pos = [self._window.x or 0, self._window.y or 0]
+        try:
+            x = self._window.x
+            y = self._window.y
+            pos = [0 if x is None else int(x), 0 if y is None else int(y)]
+        except Exception as exc:
+            self._log_input('get_position failed: %r' % (exc,))
+            pos = [0, 0]
         self._log_input('get_position -> %s' % pos)
         return pos
 
@@ -804,10 +822,22 @@ def _apply_window_region(window, rects, vw, vh):
     minx, miny, maxx, maxy = cw, ch, 0, 0
 
     def _merge(h_piece):
-        # 合并成功后 piece 归 h_total 所有，必须删掉 piece 句柄防泄漏
+        """把 piece 并进 h_total。@returns 是否真的并进去了。
+
+        ⚠️ 0.3.38 之前这个函数的返回值被**调用点直接丢掉**，而后面
+        `kept += 1` 是无条件的 —— 于是 `CombineRgn` 一旦失败（返回
+        ERROR=0，此时 h_total 一点没变，仍是上面建的空区域），`kept`
+        却已经 > 0，`if not kept` 这道"不许把空 region 设上去"的防线被
+        绕过，SetWindowRgn 成功地把一个**空区域**装到窗口上：
+
+          窗口整个不可见、鼠标完全点不到（连右键菜单都打不开 → 退不出去，
+          只能杀进程）。而且返回的是 ok=True，前端 silFails 不递增、
+          silLastKey 不清，形状又没变 → 这个错误状态会一直驻留。
+        """
         rc2 = gdi32.CombineRgn(h_total, h_total, h_piece, RGN_OR)
+        # 合并成功后 piece 归 h_total 所有，必须删掉 piece 句柄防泄漏
         gdi32.DeleteObject(h_piece)
-        return rc2
+        return rc2 != 0      # 0 = ERROR（失败），其余都是成功（含 NULLREGION）
 
     try:
         for entry in rects:
@@ -837,8 +867,18 @@ def _apply_window_region(window, rects, vw, vh):
                         if r <= l or b <= t:
                             continue
                         if rad > 0.5:
-                            ew = max(2, int(round(rad * sx * 2)))
-                            eh = max(2, int(round(rad * sy * 2)))
+                            # ⚠️ ew/eh 是这一整段里**唯一没经过钳制**的量。
+                            # rad 来自 CSS border-radius（正常 10~16px），
+                            # 但页面被改/被注入时可以传任意大值：
+                            #   · rad=1e300 → int(round(...)) 抛 OverflowError
+                            #     （`round(nan)` 才是 ValueError，那个已被捕获）
+                            #   · 大到超过 c_long → ctypes 抛 ArgumentError
+                            # 两者都不在下面的白名单里，会逃出去把**已经并好
+                            # 的几十块 region 全部作废**（外层 except 会删掉
+                            # h_total），整拍形状白干、异形窗口停摆 5 秒。
+                            # 圆角的椭圆宽高本来就不该超过矩形自身。
+                            ew = max(2, min(r - l, int(round(rad * sx * 2))))
+                            eh = max(2, min(b - t, int(round(rad * sy * 2))))
                             h_piece = gdi32.CreateRoundRectRgn(
                                 l, t, r, b, ew, eh)
                         else:
@@ -851,14 +891,18 @@ def _apply_window_region(window, rects, vw, vh):
                     if r <= l or b <= t:
                         continue
                     h_piece = gdi32.CreateRectRgn(l, t, r, b)
-            except (TypeError, ValueError, IndexError, KeyError):
+            except (TypeError, ValueError, IndexError, KeyError,
+                    OverflowError, ctypes.ArgumentError):
+                # 坏条目跳过，别让一条脏数据作废整批（白名单要覆盖
+                # float('inf') → OverflowError 和 ctypes 的类型转换失败）
                 continue
             if not h_piece:
                 continue
             minx = min(minx, l); miny = min(miny, t)
             maxx = max(maxx, r); maxy = max(maxy, b)
-            _merge(h_piece)
-            kept += 1
+            # 只有真的并进去了才计数 —— 否则 kept > 0 会放行一个空 region
+            if _merge(h_piece):
+                kept += 1
 
         meta['kept'] = kept
         if not kept:
