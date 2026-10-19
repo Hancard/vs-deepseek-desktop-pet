@@ -1,5 +1,97 @@
 # Change Log
 
+## [0.3.39] — 2026-10-20
+
+### Fixed
+
+- **二次启动会把正在运行的那个实例的日志清空**（`standalone.py`）
+  `_init_log()` 以 `'w'` 打开 `.airi-pet.log`，而"已有实例在跑"要等 `main()`
+  里绑定失败才看得出来 —— 于是第二个进程先把**正在跑的那个实例的全部排障
+  记录**清空，再写一行 `already running` 退出(0)。用户报障时打开日志只剩
+  一句"已退出"，真实现场已被抹掉；而且那个实例此后继续 append 到被截断的
+  文件里，两个进程的记录混在一起。点两次状态栏按钮 / 扩展重复拉起 / 双击
+  launch.bat 都能触发。
+  修：端口守卫提到 `_init_log()` **之前**，命中已有实例时既不截断也不写。
+  ⚠️ 排障日志是本项目唯一的可见通道 —— 扩展以 `stdio:'ignore'` 起进程，
+  print / stderr 全被丢掉，日志被清 = 出问题后完全无从查起。
+- **`AIRI_STANDALONE_PORT=0` 起出一个连不上自己的桌宠**（`standalone.py`）
+  端口只有 `int()`、没有范围校验。而 **0 是合法整数**：绑 0 = 内核随机分配
+  端口，绑定**成功** → 启动守卫不触发 → 窗口照常弹出。但 `load_html` 注入
+  的是 `http://127.0.0.1:0`，页面里 SSE / fetch 全部打到不存在的端口，扩展
+  却仍往 19876 推 —— 桌宠站得住、不说话、菜单读不到设置，日志零异常。
+  实测：绑 0 拿到 2106。扩展侧 0.3.37 已夹 `[1,65535]`，这侧一直没夹。
+- **跨源请求「声明多发少」能永久占死 handler 线程**（`standalone.py`）
+  `_cors_guard` 排空 body 的手写 `while remaining > 0` 既无上限也无读超时。
+  0.3.37 在 `_read_body()` 的注释里只论证了"负数进不去循环"，漏了"声明
+  999999 字节却一字节不发"这第二种挂死 —— 那个 read 在无超时 socket 上安静
+  等到 EOF，线程被占住、403 永远写不出去。
+  实测（修复前）：连发 3 条并保持连接 → 线程数 2→5，客户端 3 秒读超时全部
+  TimeoutError（收到的根本不是 403）。修：抽出 `_drain_body()`，同一套护栏
+  （夹上限 + 读超时 + 读完恢复阻塞），`do_OPTIONS` 的 403 也补上排空。
+- **`/push` 同步等 LLM → 扩展 500ms 超时 → 桌宠每拍复读同一条**
+  （`standalone.py`）`generate_response()` 在请求线程里同步跑，配了
+  `DEEPSEEK_API_KEY` 就是一次真实网络往返（OpenAI 客户端没传 timeout，默认
+  600s + 2 次重试）。而扩展侧超时是 **500ms**：超时后 `fileScanState` 回滚、
+  `lastPushAt` **倒退**（60s 提醒冷却被绕过）、`lastPushSignature` 不提交 →
+  下一拍重新判定又是同一批错误。最坏的是 `push_message` 在回响应**之前**
+  执行，所以"说了 + 没记账"，正是复读机的成因。
+  实测（修复前）：注入 sleep(3) 的生成函数，`/push` 耗时 3.00s。
+  修：生成搬到后台线程，`/push` 立刻回 200。
+- **非 Live2D 时点角色毫无反应**（`ui.html`）`alphaAt` 在
+  `!live2d.ready` 时 `return 0`，而 `handlePetClick` 的下一句是
+  `if (alphaAt(...) < 24) return;` —— 立绘 / CSS 角色下点击整条链路在第一道
+  判断就断了，连 `zoneAt()` 那条 `return 'body'` 的兜底都到不了。前端零报错
+  （是 return 不是异常），日志一行都没有。
+  实测（修复前）：非 Live2D 下点角色正中，`pet_click` 调用 **0 次**，而同一
+  时刻 `zoneAt()` 返回的是 `'body'`。修：改用角色元素的外接框判定。
+- **错误气泡的表情恒为 idle**（`ui.html`）
+  `var emotion = (...) || 'idle'` 已把它兜成字符串，于是下面那句
+  `setEmotion(emotion || 'angry')` 的 `|| 'angry'` **永远取不到** —— 红色错误
+  气泡在抖，角色表情纹丝不动。修：兜底值改成 `null`，各分支自己决定。
+- **气泡一出现就让 Live2D 双重晃动**（`ui.html`）`showBubble` 每次直接写内联
+  `animation`，优先级高于样式表，把 `.live2d-active{animation:none}` 打穿且
+  **永不恢复**（CSS 注释里写明：模型自带呼吸摆动，叠 idleSway = 双重晃动）。
+  而且 idleSway 带 rotate —— `.character-box` 的 rect 从此随动画漂移，角色卡
+  外接框与 region 采样每帧都在变。修：只在没有 `live2d-active` 时才重设。
+- **alpha 判为不可信后，命中判定却走那条不可信的路径**（`ui.html`）
+  `silAlphaMode === 'off'`（gl 与 2d 都不可信）时，三元式偏偏选 `'2d'` ——
+  正是刚被判定"整张画布都是角色"的那条。于是 canvas 内任何坐标 alpha 都
+  ≈255，点哪都说话；而同一时刻 `pushSilhouette` 因 `source='unreliable'`
+  拒绝设 region，窗口还是整块矩形 —— 恰是那条"两者必须一致"注释要避免的
+  错配。修：`'off'` 时按 canvas 矩形命中（与肉眼所见一致）。
+- **Cubism core 的缓存目录只被读、从没被写**（`live2d_assets.py`）
+  `ensure_core()` 会去 `~/.dsh/pets/.runtime/` 找现成的 core，但代码里从来
+  没有任何地方往那儿写 —— 死路径。core 是专有许可、不能随 VSIX 分发，于是
+  每次**重装/升级扩展**都要重新下载一次，离线环境下直接降级成立绘（"升级完
+  角色变回图片了"）。修：拿到可用 core 后顺手镜像一份到那个目录。
+- **core 校验只看体积不看内容**（`live2d_assets.py`）下载那份会校验
+  `b'Live2DCubismCore' in blob`，本地已有的这份只查 `st_size >= 50KB` —— 一个
+  "体积够大但不是 core"的文件（错误页、别处的 js）会被判成可用，Live2D 初始
+  化按成功走、实际渲染失败，而降级原因在日志里看不出来。修：统一标准。
+
+### Changed
+
+- **`start.bat` 去掉硬编码的用户名路径**：原来写死了
+  `C:\Users\<用户名>\AppData\Local\Programs\Python\Python312\python.exe`，而
+  它随 VSIX 一起分发 —— 既泄露开发者本机目录，又在任何别的机器上静默回落到
+  `python`。改成 `AIRI_PYTHON_PATH → python → python3 → py` 并用 `where`
+  逐级校验，全都没找到时明确报错。`launch.bat` / `launch_full.bat` 同样补上
+  `where` 校验（三个 bat 仍然全部是纯 ASCII —— cmd.exe 用 OEM 码页解码批处理，
+  UTF-8 中文会把整个脚本的解析搞崩）。
+- **`.vscodeignore` 收口**（vsce 只认它，不看 `.gitignore`）：补上
+  `live2dcubismcore.min.js`（Live2D 专有运行时，**不可再分发**；0.3.38 的包里
+  实测有 207,155 字节），以及 `out/test/**`、`方案B_*.md`、`.env.example`、
+  `python_backend/main.py`。注意 `python_backend/corpus.py` 与
+  `response_generator.py` **是运行时必需的**，不能排除。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_039.py`（45 条）：排空 body 的两道护栏（静态
+  契约 + **实测**线程数与真实 403）、端口取值范围 9 组、`/push` 耗时与
+  "生成真的发生了"、以及**用 node 跑 ui.html 真实函数源码**验证点击兜底 /
+  表情兜底 / 动画包裹 / `'off'` 命中四条。
+  判断力已验证：对着 0.3.38 跑是 **24 条 FAIL**（A/B/C/D/F 五段全红）。
+
 ## [0.3.38] — 2026-10-19
 
 ### Fixed
