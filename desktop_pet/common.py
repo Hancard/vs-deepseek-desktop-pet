@@ -894,13 +894,25 @@ def find_character_image():
 
     优先级：AIRI_CHARACTER_IMAGE 环境变量 > assets/character.* > 根目录 character.png
     """
+    # ⚠️ 必须返回**绝对路径**：下游 load_html() 会调 Path(...).as_uri()，
+    # 而 as_uri() 对相对路径会抛 ValueError（0.3.38）—— 用户按
+    # assets/README.md 写 `set AIRI_CHARACTER_IMAGE=assets\character.png`
+    # 时 is_file() 为真（相对当前目录能找到），然后桌宠就起不来了。
     env_path = os.environ.get('AIRI_CHARACTER_IMAGE', '').strip()
     if env_path:
         p = Path(env_path)
         if p.is_file():
-            return str(p)
-        print(f'[airi-common] WARNING: AIRI_CHARACTER_IMAGE not found: {env_path}')
-    for name in ('character.png', 'character.gif', 'character.webp'):
+            try:
+                return str(p.resolve())
+            except (OSError, ValueError):
+                # 路径含内嵌 NUL 之类的畸形输入 resolve() 会抛；宁可不用
+                print(f'[airi-common] WARNING: bad AIRI_CHARACTER_IMAGE: {env_path}')
+        else:
+            print(f'[airi-common] WARNING: AIRI_CHARACTER_IMAGE not found: {env_path}')
+    # 后缀按 README 承诺的四种来（.jpg 之前漏了：用户把 character.jpg 放进
+    # assets/ 会静默退回 CSS 角色，一句警告都没有）。
+    for name in ('character.png', 'character.gif', 'character.webp',
+                 'character.jpg', 'character.jpeg'):
         p = _SCRIPT_DIR / 'assets' / name
         if p.is_file():
             return str(p)
@@ -928,9 +940,41 @@ def load_html(port, char_img=None, live2d=False, silhouette=False, card='square'
     传默认值而不是留空：这个标记没被替换时页面会拿到字面量 '{{...}}'，
     前端用 parseInt + isFinite 兜住（同 SILHOUETTE 的防御套路）。
     真正的权威值仍在 Python 的 settings 里，菜单打开时会 GET /settings 复核。
+
+    @returns HTML 字符串；**读不到 ui.html 时返回 None**（调用方必须先判空再
+    交给 start_asset_server —— 否则会把 None 当正文起服务）。立绘路径有问题
+    只降级（退回 CSS 角色），不影响返回值。
     """
-    html = (_SCRIPT_DIR / 'ui.html').read_text(encoding='utf-8')
-    img_uri = Path(char_img).as_uri() if char_img else ''
+    # ⚠️ 这里原来是裸调用，两件事都能让它抛：
+    #   ① ui.html 缺失 / 被占用 / 非 UTF-8；② char_img 是相对路径时
+    #      as_uri() 抛 ValueError（find_character_image 已改成返回绝对路径，
+    #      但 load_html 是对外 API，别人照样可能传相对路径进来）。
+    #   而两个调用点（standalone.py / main.py）都是裸调用，进程一崩，
+    #   traceback 走 stderr 被扩展以 stdio:'ignore' 丢掉 —— 用户点「启动桌宠」
+    #   什么都没有，日志文件里也一行线索都不留（0.3.38）。
+    try:
+        html = (_SCRIPT_DIR / 'ui.html').read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f'[airi-common] ERROR: cannot read ui.html: {exc!r}')
+        return None
+    img_uri = ''
+    if char_img:
+        try:
+            p = Path(char_img)
+            # as_uri() 只吃绝对路径（相对路径直接 ValueError）→ 先补成绝对
+            p = p if p.is_absolute() else p.resolve()
+            # ⚠️ resolve() 对**不存在**的路径也是成功的（非严格模式），于是
+            # as_uri() 会顺利产出一个指向空处的 file:// —— 页面拿到它只会
+            # 显示一个裂图，比"退回 CSS 角色"更难看。存在性必须自己查。
+            img_uri = p.as_uri() if p.is_file() else ''
+            if not img_uri:
+                print(f'[airi-common] WARNING: character image not a file:'
+                      f' {char_img!r}')
+        except (OSError, ValueError) as exc:
+            # 立绘拿不到不该拖累整个页面：退回 CSS 角色，留一条警告
+            print(f'[airi-common] WARNING: bad character image {char_img!r}:'
+                  f' {exc!r}')
+            img_uri = ''
     html = html.replace('{{PORT}}', str(int(port)))
     html = html.replace('{{CHARACTER_IMAGE}}', img_uri)
     html = html.replace('{{LIVE2D_ENABLED}}', 'true' if live2d else 'false')

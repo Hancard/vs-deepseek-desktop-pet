@@ -47,6 +47,9 @@ def main():
     print(f'[airi-live2d] character card {card}')
 
     html = load_html(port, live2d=l2d_ok, silhouette=sil, card=card)
+    if not html:
+        print('[airi-desktop] ERROR: cannot load ui.html, exit.')
+        sys.exit(1)
     page_url, _asset_port = start_asset_server(html)
     if page_url is None:
         print('[airi-desktop] ERROR: cannot start asset server, exit.')

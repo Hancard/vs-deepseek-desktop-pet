@@ -1056,6 +1056,11 @@ def main():
 
     html = load_html(PORT, char_img, live2d=l2d_ok, silhouette=sil, card=card,
                      detect_sec=settings['detectIntervalSec'])
+    if not html:
+        # load_html 返回 None = ui.html 读不出来。以前这里会直接抛异常，
+        # traceback 进 stderr 被扩展丢掉，用户只看到"点了没反应"（0.3.38）。
+        log('[airi-standalone] ERROR: cannot load ui.html, exit.')
+        sys.exit(1)
     page_url, asset_port = start_asset_server(html)
     if page_url is None:
         log('[airi-standalone] ERROR: cannot start asset server, exit.')
