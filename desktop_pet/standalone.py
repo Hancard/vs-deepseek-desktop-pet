@@ -603,6 +603,47 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reas
         push_message('chatMessage', '哼，全部修好了…算你厉害。', 'happy')
 
 
+def _generate_async(ctx, tag):
+    """在**后台线程**里跑 generate_response（0.3.39）。
+
+    ⚠️ 为什么不能在 HTTP 请求线程里同步生成：generate_response 会走一次真实
+    的 DeepSeek 往返（response_generator 里的 OpenAI 客户端没传 timeout，
+    默认 600s + 2 次重试）。而扩展侧 postJsonToPet 的超时是 **500ms**
+    （extension.ts）——请求线程一旦慢于它，扩展就 `req.destroy()`、判定
+    delivered=false，于是：
+
+      · fileScanState 回滚成上一个状态、lastPushAt **倒退**（60s 提醒冷却被绕过）
+      · diagPushPending / lastPushSignature 不提交
+      · 下一拍重新判定 → 又是同一批错误 → **桌宠每个周期把同一句话重说一遍**
+
+    实测：注入一个 sleep(3) 的生成函数，/push 耗时 3.00s —— 扩展在 500ms
+    就已经放弃了，而桌宠这边其实**已经把话说出去了**（push_message 在响应
+    之前执行）。结果是"说了 + 状态没提交"的最坏组合：复读机。
+
+    改到后台线程后：/push 立刻回 200（扩展按时提交状态），桌宠 1~2 秒后
+    说话 —— 本来就是异步气泡，晚一点到这才是符合直觉的时序。
+    """
+    def _run():
+        try:
+            r = generate_response(ctx)
+        except Exception as exc:
+            # 扩展用 stdio:'ignore' 起进程，这里不落日志的话失败就是零痕迹
+            log('[airi-standalone] %s generate failed: %r' % (tag, exc))
+            return
+        if not r:
+            return
+        try:
+            payload = r.get('payload') or {}
+            text = payload.get('text', '')
+            if not text:
+                return
+            push_message(r.get('type') or 'chatMessage', text,
+                         payload.get('emotion', 'idle'))
+        except Exception as exc:
+            log('[airi-standalone] %s push failed: %r' % (tag, exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+
 
 # ---------------------------------------------------------------------------
 # HTTP 服务器
@@ -865,17 +906,15 @@ class AiriHandler(BaseHTTPRequestHandler):
                     'sample_errors': items[:5] if isinstance(items, list) else [],
                 }
                 if _backend_available:
-                    r = generate_response(ctx)
-                    if r:
-                        push_message(r.get('type', 'chatMessage'), r.get('payload', {}).get('text', ''), r.get('payload', {}).get('emotion', 'idle'))
+                    # 见 _generate_async 的注释：生成必须在请求线程之外，
+                    # 否则扩展 500ms 超时 → 状态回滚 → 每拍复读同一条。
+                    _generate_async(ctx, 'diagnostics')
                 else:
                     _builtin_reply(ctx['error_count'], ctx.get('trigger', 'diagnostics'),
                                    '', ctx.get('sample_errors'))
             elif 'trigger' in msg or 'error_count' in msg:
                 if _backend_available:
-                    r = generate_response(msg)
-                    if r:
-                        push_message(r.get('type'), r.get('payload', {}).get('text', ''), r.get('payload', {}).get('emotion', 'idle'))
+                    _generate_async(msg, 'trigger')
                 else:
                     try:
                         _ec = int(msg.get('error_count', 0) or 0)
