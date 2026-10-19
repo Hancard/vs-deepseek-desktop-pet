@@ -1163,9 +1163,19 @@
       el.textContent = '';
       typeText(el, text);
       // 轻推角色
-      charBox.style.animation = 'none';
-      charBox.offsetHeight;
-      charBox.style.animation = 'idleSway 4s infinite ease-in-out';
+      // ⚠️ 只在**没有** Live2D 时才重设动画（0.3.39）：内联样式的优先级
+      //    高于样式表，这三行会把 CSS:313 那条 `.character-box.live2d-active
+      //    { animation: none; }` 彻底打穿而且**永不恢复**（Live2D 加载成功
+      //    时加的 class 还在，但管不住内联）。后果正是那段 CSS 注释里写的
+      //    "模型自带呼吸与摆动，再叠加 CSS 的 idleSway 会变成双重晃动"，
+      //    而且 idleSway 带 rotate —— .character-box 的 rect 会随动画漂移
+      //    （那段注释也说了：因此量尺寸要用 clientWidth 而不是 rect），
+      //    于是角色卡外接框与窗口 region 的采样结果每帧都在变。
+      if (!charBox.classList.contains('live2d-active')) {
+        charBox.style.animation = 'none';
+        charBox.offsetHeight;
+        charBox.style.animation = 'idleSway 4s infinite ease-in-out';
+      }
       // 气泡一出现就得进窗口形状，否则要等下一次轮询 —— 那一瞬间气泡会被 region 裁掉。
       // 必须显式传 true：setTimeout(fn, 0) 按规范是**不带参数**调用的，
       // 写成 setTimeout(pushSilhouette, 0) 并不会把 force 传成真值。
@@ -1347,7 +1357,18 @@
       // 以前这里是自己单点 readPixels：如果那个环境的默认帧缓冲没有真 alpha
       // （WebView2 windowed hosting 下有可能），它会恒返回 255 ——
       // 于是"点哪儿都算点到角色"。轮廓和命中必须用同一个可信来源。
-      var grid = readAlphaGrid(silAlphaMode === '2d' || silAlphaMode === 'off' ? '2d' : 'gl');
+      if (silAlphaMode === 'off') {
+        // 'off' = gl 与 2d 两条路径都被判为不可信。以前这里在 'off' 时选
+        // '2d' —— 而 '2d' 正是刚刚被判定"整张画布都是角色"的那条，于是
+        // canvas 内任何坐标的 alpha 都接近 255，`alphaAt(...) < 24` 永不
+        // 成立：角色周围的空白（水、桌面以外）点哪都说话，而同一时刻
+        // pushSilhouette 因为 source='unreliable' 拒绝设 region，窗口还是
+        // 一整块矩形 —— 与上面那条"两者必须一致"的注释正好相反。
+        // 但不能简单 return 0（那样点击又整条失效）：此刻窗口就是矩形，
+        // 按 canvas 矩形命中才和肉眼看到的形状一致。
+        return 255;
+      }
+      var grid = readAlphaGrid(silAlphaMode === '2d' ? '2d' : 'gl');
       if (!grid) return 0;
       var gx = Math.min(grid.w - 1,
                         Math.max(0, Math.round((clientX - rect.left) / rect.width * grid.w)));
