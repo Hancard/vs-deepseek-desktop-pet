@@ -1193,12 +1193,17 @@
         try {
           var msg = JSON.parse(event.data);
           if (!msg || !msg.type) return;
-          var emotion = (msg.payload && msg.payload.emotion) || 'idle';
+          // ⚠️ 这里**不能**兜底成 'idle'：emotion 一旦是字符串就永远是真值，
+          // 下面 errorAlert 那句 `setEmotion(emotion || 'angry')` 就永远取
+          // 不到 'angry' —— 红色错误气泡在抖，角色表情却纹丝不动（0.3.39
+          // 实测：不带 emotion 的 errorAlert，实际传给 setEmotion 的是
+          // 'idle'）。保持 null，让每个分支自己决定兜底值。
+          var emotion = (msg.payload && msg.payload.emotion) || null;
           switch (msg.type) {
-            case 'chatMessage': showBubble(msg.payload.text || '', false); setEmotion(emotion); break;
+            case 'chatMessage': showBubble(msg.payload.text || '', false); setEmotion(emotion || 'idle'); break;
             case 'errorAlert': showBubble(msg.payload.text || '', true); setEmotion(emotion || 'angry'); break;
             case 'backendExit': setOnline(false); showBubble('deepseek 已离线…', true); break;
-            case 'pythonMessage': if (msg.payload && msg.payload.message) { showBubble(msg.payload.message, false); setEmotion(emotion); } break;
+            case 'pythonMessage': if (msg.payload && msg.payload.message) { showBubble(msg.payload.message, false); setEmotion(emotion || 'idle'); } break;
           }
         } catch (e) {}
       };
@@ -1304,8 +1309,34 @@
     // 所以直接问 WebGL：这个点上的像素到底是不是角色。
     // 能这么做的前提是 app.init 时开了 preserveDrawingBuffer —— 关掉的话
     // readPixels 只会读到一片空白。
+    // 非 Live2D 时"角色"到底是哪个元素（图片立绘 / CSS Q 版人）。
+    // 命中判定必须有这条兜底，理由见 alphaAt。
+    function fallbackCharacterEl() {
+      if (charImg && charImg.style.display !== 'none' && charImg.src) {
+        return charImg;
+      }
+      if (cssChar && cssChar.classList.contains('visible')) return cssChar;
+      return null;
+    }
+
     function alphaAt(clientX, clientY) {
-      if (!live2d.ready || !live2d.app) return 0;
+      if (!live2d.ready || !live2d.app) {
+        // 非 Live2D（素材缺失 → 图片立绘 / CSS 角色）时**没有 alpha 可读**。
+        // 以前这里直接 return 0，于是 handlePetClick 里 `alphaAt(...) < 24`
+        // 恒成立 —— 连 zoneAt() 那条 `return 'body'` 的兜底都到不了，
+        // api.pet_click 一次都不会被调用：**点角色完全没反应**，而且前端
+        // 零报错（是 return 不是异常）、日志里一行痕迹都没有。
+        // 0.3.39 实测：非 Live2D 下点 canvas 正中，pet_click 调用 0 次，
+        // 而同一时刻 zoneAt() 返回的是 'body' —— 意图与实现对不上。
+        // 这条路径上用**角色元素的外接框**代替像素命中即可。
+        var fb = fallbackCharacterEl();
+        if (!fb) return 0;
+        var fr = fb.getBoundingClientRect();
+        if (fr.width < 1 || fr.height < 1) return 0;
+        if (clientX < fr.left || clientX >= fr.right ||
+            clientY < fr.top || clientY >= fr.bottom) return 0;
+        return 255;
+      }
       var canvas = live2d.app.canvas;
       var rect = canvas.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return 0;
