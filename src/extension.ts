@@ -466,7 +466,15 @@ function scanActiveFile(): boolean {
 		}
 		return false;
 	}
-	fileScanState = { uri: uri.toString(), signature, count, lastPushAt: now };
+	// ⚠️ fileScanState 先记下**本次写的那个对象**，回滚时做引用比较（0.3.41）。
+	// 直接 `fileScanState = prev` 是有条件的：这个投递是**异步**的
+	// （postJsonToPet 有 500ms 超时），而 petTick 最短可以设到 1 秒一次。
+	// 主线程繁忙时超时回调可能迟到到下一拍之后：那时 fileScanState 早就被
+	// 下一拍换成了更新的状态，无条件回滚会把**更新的那份直接抹掉** ——
+	// 桌宠恢复后会把已经判过的内容再播一遍。只有"状态还停在我写的这份"时，
+	// 回滚才是我该做的事。
+	const mine: FileScanState = { uri: uri.toString(), signature, count, lastPushAt: now };
+	fileScanState = mine;
 
 	const message = {
 		trigger: 'file_scan' as const,
@@ -494,9 +502,8 @@ function scanActiveFile(): boolean {
 		// 显示"已经报过"——bug 首播被静默吞掉，用户要么等满一个 repeatSec
 		// 冷却、要么永远收不到"干净了"（count=0 走不到 remind 分支）。
 		// 与 pushPendingDiagnostics 的"脏标记不可吞"同源。
-		// prev 是本次改动前的状态对象（新文件时为 undefined）——回滚它即可，
-		// 因为 fileScanState 在上面已经被换成了新对象，不会自我覆盖。
-		fileScanState = prev;
+		// prev 是本次改动前的状态对象（新文件时为 undefined）——回滚它即可。
+		if (fileScanState === mine) { fileScanState = prev; }
 	})();
 	return true;
 }
