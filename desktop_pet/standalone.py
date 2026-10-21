@@ -105,6 +105,9 @@ PORT_MIN = 1
 PORT_MAX = 65535
 
 
+_port_warning = []      # resolve_port() 攒下的告警，由 flush_port_warning() 落盘
+
+
 def resolve_port():
     """解析监听端口，坏输入 / 越界一律回落 DEFAULT_PORT（0.3.39）。
 
@@ -119,14 +122,32 @@ def resolve_port():
     try:
         port = int(os.environ.get('AIRI_STANDALONE_PORT', '') or DEFAULT_PORT)
     except (TypeError, ValueError):
+        _port_warning.append(
+            'AIRI_STANDALONE_PORT=%r not an integer, fallback to %d'
+            % (os.environ.get('AIRI_STANDALONE_PORT'), DEFAULT_PORT))
         return DEFAULT_PORT
     if not (PORT_MIN <= port <= PORT_MAX):
-        log('[airi-standalone] AIRI_STANDALONE_PORT=%r out of range '
-            '[%d..%d], fallback to %d'
+        _port_warning.append(
+            'AIRI_STANDALONE_PORT=%r out of range [%d..%d], fallback to %d'
             % (os.environ.get('AIRI_STANDALONE_PORT'), PORT_MIN, PORT_MAX,
                DEFAULT_PORT))
         return DEFAULT_PORT
     return port
+
+
+def flush_port_warning():
+    """把 resolve_port() 攒下的告警真正写进日志（0.3.40）。
+
+    ⚠️ 为什么不能在 resolve_port() 里直接 log：__main__ 里 `resolve_port()`
+    跑在 `_ping_ok()` 守卫**之前**（要先知道端口才能探测），而守卫命中意味着
+    "已经有实例在跑"——那份日志属于那个还在跑的进程。0.3.39 花了很大力气
+    保证第二个进程不截断、不写那个日志，结果 resolve_port 自己往里追加了
+    一行 `AIRI_STANDALONE_PORT='0' out of range`（实测：日志 +98 字节，
+    且没有本次的 `--- boot ---`，看不出是哪个进程写的）。
+    所以这里改成"先攒着，等守卫放行、_init_log() 之后再由 main() 落盘"。
+    """
+    while _port_warning:
+        log('[airi-standalone] ' + _port_warning.pop(0))
 
 
 def clamp_detect_sec(value):
@@ -1282,6 +1303,9 @@ def main(port=None):
     global _api_ref
     if port is None:
         port = resolve_port()
+    # 端口告警到这里才落盘：此时 __main__ 的"已有实例在跑"守卫已经放行，
+    # 可以确定这份日志属于本进程（见 flush_port_warning 的注释）。
+    flush_port_warning()
     PORT = port
     server_ready = threading.Event()
     server_thread = threading.Thread(target=start_server, args=(PORT, server_ready), daemon=True)
