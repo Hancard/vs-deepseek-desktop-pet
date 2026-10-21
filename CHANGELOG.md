@@ -1,5 +1,90 @@
 # Change Log
 
+## [0.3.41] — 2026-10-22
+
+### Fixed
+
+- **文件监听整份静默失效**（`watcher.py`）
+  过滤条件作用在整个**绝对路径**的 `f.parts` 上，于是监听根**之上**的祖先
+  目录也被一起判了：只要监听根位于任何以 `.` 开头的祖先目录下
+  （`.workbuddy` / `.cache` / `.cursor` / `.vscode`…）或祖先里有 `build` /
+  `dist` / `venv` / `node_modules`，**每一个**文件都会被跳过。rglob 照跑、
+  启动信息照常打印，然后 `changed_files` 永远是空的 —— 桌宠从此一声不响，
+  用户既看不到错误也看不到任何提示，完全无从判断是"没监听"还是"代码没
+  bug"。实测（修复前）：监听根下 3 个 `.py` 扫到 **0** 个；真实目录
+  `~/.workbuddy` 下 4468 个 `.py` 存活 **0** 个。
+  修：过滤只作用在 `relative_to(watch_path)` 的那几段上，抽成 `should_skip()`。
+- **C/C++ 检查串行阻塞最长 200 秒**（`watcher.py`）
+  每轮最多检查 20 个文件，而 C/C++ 检查是起 gcc/g++ 子进程（各 10s 超时）
+  且**串行**执行：切分支/`git checkout` 时最坏 20×10 = 200 秒。这三分多钟里
+  轮询间隔和整棵树扫描一行都不会执行 —— 期间保存的 `.py` 也不播报，
+  `all_clear` 也要等拖完才发。修：有界线程池（4 个）并发，最坏降到 ~50s。
+- **对已删除文件产出伪诊断；子进程输出未指定编码**（`watcher.py`）
+  ① 文件被删掉/移走时仍会起 gcc，它输出 `cc1.exe: fatal error: xxx.c: No
+  such file or directory`，里面带 `error:` 于是被当成**真错误**计入总数并
+  长期留驻（实测 `check_c(不存在的文件)` 返回 1 条）。② `subprocess.run`
+  只写了 `text=True`：此时用**系统 ANSI 代码页**解码（ACP=936 → cp936），
+  而 gcc 输出是 UTF-8，解码失败抛 `UnicodeDecodeError` —— 它**不是**
+  `OSError`，会穿过 `except FileNotFoundError` 落到裸 `except Exception`，
+  变成一条 `"'utf-8' codec can't decode"` 的伪诊断推给用户。
+  ⚠️ ② 在本机未能实测复现（本机 `locale.getpreferredencoding()` 是 utf-8，
+  开了 UTF-8 mode 恰好躲过；但 ACP 仍是 936，未开 UTF-8 mode 的中文 Windows
+  上必然触发）。
+- **SSE 进入 CLOSED 后永久断流**（`ui.html`）
+  EventSource 只对"网络断了"自动重连；一旦服务端回了**不是
+  text/event-stream** 的响应（端口被别的进程占住时最常见：那个端口上的服务
+  对 `/events` 回 404 或一段 HTML），浏览器会置成 CLOSED 并**彻底停止重
+  试** —— 之后一条消息都收不到，状态点恒为 offline，扩展推过来的话也进不
+  了气泡，而且没有任何提示。用户只能整个重启桌宠。
+  修：`onerror` 判 `readyState === CLOSED`，带退避（1s 起、封顶 15s）重建；
+  `CONNECTING` 不插手（那是浏览器自己在重试）。
+- **检测周期：保存失败界面说谎 / 响应乱序回弹**（`ui.html`）
+  ① POST 的 `.catch` 是空实现，失败后界面一直停在假值上，直到下次右键被
+  `syncDetectSec` 弹回去 —— 表现为"设置莫名其妙自己跳回去"。② 200 不等于
+  落盘成功：`save_settings` 写文件失败时返回 `saved:false`，以前不看这个字
+  段。③ 服务端是**多线程**服务器，响应不保证按发出顺序回来：右键开菜单
+  （发 GET）后立刻点 chip（发 POST），先处理完的 POST 会被随后那个读到旧值
+  的 GET 覆盖。④ 连点「+」10 下 = 10 个并发写。
+  修：POST/GET 共用自增 `settingsSeq`，回调只接受序号最大的那个；失败与
+  `saved:false` 都回滚 + 气泡提示；POST 合并 150ms 只提交最后一次的值。
+- **底板取样失败计数在 5↔6 之间无限振荡**（`ui.html`）
+  两条失败分支写的是 `cardSamples = CARD_SAMPLES - 1`，下一轮"已锁定"判定
+  又是 false —— **永远锁不定**：视口尺寸恒取不到时每 500ms 重跑一次完整
+  `characterRects()`（两次全画布 `readPixels` + `drawImage`），永久 CPU 空
+  转。修：失败次数封顶（20 次）后强制锁定。
+- **启动桌宠在 8 秒等待窗口内会 spawn 第二个进程**（`extension.ts`）
+  "等服务器起来"最多跑 8 秒，期间存活探测一直为 false；用户最常见的操作
+  "点了没反应再点一下"会**完整地再走一遍 spawn** —— 同时两个 python（第二
+  个 bind 失败，要等它自己的 5 秒守卫才退出），且用户收到两条一模一样的
+  "桌宠已启动"通知。修：用 Promise 把整段包住，重复调用返回同一个。
+- **迟到的回滚会抹掉更新的状态**（`extension.ts`）
+  `scanActiveFile` 的投递是异步的（500ms 超时），而检测周期最短可设到 1 秒。
+  主线程繁忙时超时回调可能迟到到下一拍之后，无条件 `fileScanState = prev`
+  会把**更新的那份直接抹掉** —— 桌宠恢复后把已判过的内容再播一遍。
+  修：改成引用比较（只在状态仍停在自己写的那份时才回滚）。
+- **diagnostics items 的 message 未截断**（`extension.ts`）
+  `file_scan` 那条链路早就 `clipMessage(60)`，这条却原样投喂；C++ 模板错误、
+  clang-tidy 说明、Python traceback 随便几 KB，20 条叠加后 body 能到几百
+  KB —— 既容易撞 500ms 超时，也让每次签名比较都在序列化大字符串。
+- **面板端口写死 19876 / 面板 dispose 不摘除**（`extension.ts`）
+  用 `AIRI_STANDALONE_PORT` 换过端口时这块面板会指错方向；面板每次新建都
+  往 `subscriptions` 追加、dispose 时不摘，反复"开→关"会一直堆积。
+- **AIRI_WIN_BG=off 白等 10 秒并打印误导 WARNING**（`main.py`）
+  按配置"别动底色"时 `fix_window_background()` 必然返回 False，而重试循环
+  只认 `ok`，于是把 10 秒跑满再打一条并不是故障的 WARNING。
+- **其他**：`reportSil` 是唯一没有 `.catch` 的 fetch（异步拒绝逃得过外层
+  try/catch，会被全局 unhandledrejection 反过来上报一条 `jsError: Failed to
+  fetch` 淹掉真正原因）；「编辑语料」请求没到达时菜单收起后一片死寂、前后
+  端日志都零痕迹；SSE 消息缺 payload 时被空 catch 静默吞掉。
+
+### Tests
+
+- `live2d_probe/test_pet_041.py`（61 条）。**判断力已验证**：对 0.3.40 跑是
+  **29 条 FAIL**，修完 61 条全绿。
+- `src/test/extension.test.ts` 的"支持语言集合"用例原本是在测试文件里另抄
+  一份字面量自己断言自己（改成 `['rust','go','ts']` 依旧全绿，零覆盖）。
+  改为从 `extension.ts` 导入真实的 `supportedLanguageIds`。
+
 ## [0.3.40] — 2026-10-21
 
 ### Fixed
