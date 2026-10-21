@@ -1193,10 +1193,33 @@
     }
 
     // ============ SSE 连接 ============
+    // EventSource 只对"网络断了/服务端关了连接"自动重连。一旦服务端回了
+    // **不是 text/event-stream** 的响应（端口被别的进程占住时最常见：那个
+    // 端口上的服务对 /events 回 404 或一段 HTML），浏览器会把连接置成
+    // CLOSED 并**彻底停止重试** —— 之后一条消息都收不到，状态点恒为
+    // offline，扩展推过来的话也进不了气泡，而且没有任何提示（onerror 只
+    // 调了 setOnline(false)）。用户只能整个重启桌宠。
+    // 所以这里必须自己盯 readyState 并带退避地重建。
+    var sseInstance = null;
+    var sseRetryTimer = null;
+    var sseRetryDelay = 1000;
+
+    function scheduleSSERetry() {
+      if (sseRetryTimer) return;                 // 已经在等了，别叠定时器
+      sseRetryTimer = setTimeout(function() {
+        sseRetryTimer = null;
+        try { if (sseInstance) sseInstance.close(); } catch (e) {}
+        connectSSE();
+      }, sseRetryDelay);
+      sseRetryDelay = Math.min(sseRetryDelay * 2, 15000);  // 退避，封顶 15s
+    }
+
     function connectSSE() {
       var es = new EventSource(SSE_URL);
+      sseInstance = es;
       es.onopen = function() {
         setOnline(true);
+        sseRetryDelay = 1000;                    // 真的连上了就把退避重置
         fetch(EVENT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'desktopReady' }) }).catch(function() {});
       };
       es.onmessage = function(event) {
@@ -1209,15 +1232,25 @@
           // 实测：不带 emotion 的 errorAlert，实际传给 setEmotion 的是
           // 'idle'）。保持 null，让每个分支自己决定兜底值。
           var emotion = (msg.payload && msg.payload.emotion) || null;
+          // payload 缺失/不是对象时以前是直接 `msg.payload.text` → 抛
+          // TypeError 被下面的空 catch 吞掉：消息静默消失，用户看到"扩展说
+          // 已推送但桌宠没说话"，日志里零痕迹。统一取一份安全的 payload。
+          var pl = (msg.payload && typeof msg.payload === 'object') ? msg.payload : {};
           switch (msg.type) {
-            case 'chatMessage': showBubble(msg.payload.text || '', false); setEmotion(emotion || 'idle'); break;
-            case 'errorAlert': showBubble(msg.payload.text || '', true); setEmotion(emotion || 'angry'); break;
+            case 'chatMessage': showBubble(pl.text || '', false); setEmotion(emotion || 'idle'); break;
+            case 'errorAlert': showBubble(pl.text || '', true); setEmotion(emotion || 'angry'); break;
             case 'backendExit': setOnline(false); showBubble('deepseek 已离线…', true); break;
-            case 'pythonMessage': if (msg.payload && msg.payload.message) { showBubble(msg.payload.message, false); setEmotion(emotion || 'idle'); } break;
+            case 'pythonMessage': if (pl.message) { showBubble(pl.message, false); setEmotion(emotion || 'idle'); } break;
           }
-        } catch (e) {}
+        } catch (e) {
+          try { reportJS('sseBadMessage', String(e && e.message || e)); } catch (e2) {}
+        }
       };
-      es.onerror = function() { setOnline(false); };
+      es.onerror = function() {
+        setOnline(false);
+        // 2 = CLOSED：浏览器已经放弃，不会自己再试（见函数上方注释）
+        if (es.readyState === 2) { scheduleSSERetry(); }
+      };
       return es;
     }
 
