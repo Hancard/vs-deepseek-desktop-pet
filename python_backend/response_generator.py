@@ -76,6 +76,19 @@ def categorize_errors(errors: list) -> str:
     return max(counts, key=counts.get) if counts else "syntax_error"
 
 
+def _nvl(value, fallback="?"):
+    """把 JSON null / 空串换成占位符（0.3.40）。
+
+    ⚠️ 不能用 `value or fallback`：行号**真可以是 0**（扩展发的就是
+    `range.start.line + 1`，最小 1；watcher 那条链路会发 0），`or` 会把
+    合法值一并吃掉。而 `dict.get(k, default)` 只在键不存在时生效，键存在
+    但值是 null 时照样返回 None —— 直接拼进气泡就成了"第 None 行：None"。
+    """
+    if value is None or value == "":
+        return fallback
+    return value
+
+
 def pick_corpus(category: str, variables: dict = None) -> str:
     """从语料库中随机选取一条台词，并替换变量占位符
 
@@ -86,6 +99,7 @@ def pick_corpus(category: str, variables: dict = None) -> str:
     为什么不能在 import 期把列表绑进来：corpus 支持热重载（用户改完保存立刻
     生效），`from corpus import FILE_SCAN` 绑的是**当初那个 list 对象**，用户
     改完文件这边还指着旧的，表现成"我改了怎么没生效"。
+
     """
     lines = corpus.get_lines(category)
     text = random.choice(lines or corpus.ENCOURAGE)
@@ -192,11 +206,16 @@ def generate_response(context: dict) -> dict:
     language = context.get("language", "python")
     # sample_errors 元素不一定是 dict（外部 /push 可传字符串数组），
     # 统一归一化成 dict，categorize_errors / try_deepseek_api 都按 dict 消费
+    # 外部输入不可信：sample_errors 传标量（数字/布尔）时 `for e in raw`
+    # 会抛 TypeError（实测 sample_errors=5 → "'int' object is not
+    # iterable"），整条播报变成空气泡。非列表一律按空处理。
     raw = context.get("sample_errors") or []
-    # sample_errors 本身是字符串时不能迭代它 —— 否则会被拆成单个字符
-    # （"oops" → 'o','o','p','s'，气泡里出现"第?行：o"这种垃圾）
     if isinstance(raw, (str, bytes)):
+        # 字符串可迭代，但会被拆成单个字符（"oops" → 'o','o','p','s'，
+        # 气泡里出现"第?行：o"这种垃圾），所以单独包成单元素
         raw = [raw]
+    elif not isinstance(raw, (list, tuple)):
+        raw = []
     errors = [
         e if isinstance(e, dict) else {"message": str(e)}
         for e in raw
@@ -265,14 +284,18 @@ def generate_response(context: dict) -> dict:
             variables = {"file": file_name, "count": error_count,
                          "language": language, "line": "?", "lines": "?"}
             if errors:
-                variables["line"] = errors[0].get("line", "?")
+                # ⚠️ dict.get(k, default) 只在**键不存在**时给默认值：值是
+                # JSON null 时返回 None，气泡里就原样念出"第 None 行：None"
+                # （实测）。注意不能用 `or`：watcher 与扩展都会发 line=0，
+                # `or` 会把合法的 0 也吃掉。
+                variables["line"] = _nvl(errors[0].get("line"))
                 variables["lines"] = "、".join(
-                    "第%s行" % e.get("line", "?") for e in errors[:3])
+                    "第%s行" % _nvl(e.get("line")) for e in errors[:3])
             text = pick_corpus(corpus_key, variables)
             # 点名具体 bug（行号 + 内容，最多 3 条）
             detail = "；".join(
-                "第%s行：%s" % (e.get("line", "?"),
-                                str(e.get("message", ""))[:40])
+                "第%s行：%s" % (_nvl(e.get("line")),
+                                str(_nvl(e.get("message"), ""))[:40])
                 for e in errors[:3])
             if detail:
                 text = text + " " + detail
