@@ -86,10 +86,24 @@ def check_c(filepath: str) -> list:
     compiler = 'g++' if is_cpp else 'gcc'
     language_id = 'cpp' if is_cpp else 'c'
     errors = []
+    # 文件已被删掉/移走时不要再跑编译器：gcc 会输出
+    # "cc1.exe: fatal error: xxx.c: No such file or directory" —— 里面带
+    # 'error:'，会被当成一条真错误计入总数，并长期留在 known_errors 里
+    # （实测：`gcc -fsyntax-only foo.c` 对不存在的文件 rc=1 且 stderr 含
+    #  "fatal error: ... No such file or directory"）。
+    if not os.path.isfile(filepath):
+        return errors
     try:
+        # ⚠️ 必须显式给 encoding（0.3.41）：只写 text=True 时 subprocess 用
+        # **系统 ANSI 代码页**解码（本仓库开发机 ACP=936 → cp936）。gcc 的
+        # 诊断输出是 UTF-8（中文路径、中文标识符、UTF-8 源码里的字符串都能
+        # 触发），cp936 解码失败会抛 UnicodeDecodeError —— 它不是 OSError，
+        # 会穿过下面的 except 落到裸 `except Exception`，于是变成一条
+        # "'utf-8' codec can't decode ..." 的**伪诊断**推给用户。
         result = subprocess.run(
             [compiler, '-fsyntax-only', filepath],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=10,
+            encoding='utf-8', errors='replace'
         )
         stderr = result.stderr.strip()
         if stderr:
