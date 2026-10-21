@@ -603,12 +603,56 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reas
         push_message('chatMessage', '哼，全部修好了…算你厉害。', 'happy')
 
 
+# ---------------------------------------------------------------------------
+# 后台生成的调度状态（0.3.40）
+#
+# 0.3.39 把生成挪出请求线程时只解决了"扩展 500ms 超时"，却把「/push 一定
+# 回 200」变成了「这条播报一定算送达」—— 而生成是在 200 之后才跑的：
+# 它失败、返回空、或者返回得比下一条还晚，扩展那边已经把状态提交完了，
+# 没有任何人会再来补一次。于是 0.3.39 换来的是三个新症状（都实测过）：
+#
+#   · 丢单：生成抛异常 / 返回 None / 返回空文本 → 一条气泡都不出（实测
+#     三种情况 sse_queue 增量都是 0，而 /push 回了 200）
+#   · 重复：0.2 秒内连发两次同内容的 /push → 两条线程各说一遍
+#     （实测 sse_queue 增量 = 2）
+#   · 乱序：先 file_scan「还有 3 个 bug」后 all_clear「干净了」，前一条慢
+#     → 气泡先说"干净了"再说"还有 3 个 bug"，桌宠自己推翻自己
+#     （实测 order = ['干净了', '还有3个bug']）
+#
+# 所以这里补三件事：失败回落到内置台词（保证"收了就一定说得出话"）、
+# 同签名在途去重、单调序号丢弃过期结果。
+# ---------------------------------------------------------------------------
+_gen_lock = threading.Lock()
+_gen_seq = 0          # 已受理的生成序号（单调递增）
+_gen_done_seq = 0     # 已完成并播报的最大序号；比它小的结果一律作废
+_gen_inflight = set() # 在途生成的签名
+
+# 在途上限：后端挂住时（无 timeout 的 LLM 往返）不能无限堆积线程
+MAX_PENDING_GENERATIONS = 4
+
+
+def _gen_signature(ctx):
+    """把一次生成请求压成去重用的签名。
+
+    只取"说什么"相关的字段：同一批 bug 的重复提醒会被并成一条。
+    """
+    try:
+        return json.dumps({
+            'trigger': ctx.get('trigger'),
+            'file': ctx.get('file'),
+            'error_count': ctx.get('error_count'),
+            'reason': ctx.get('reason'),
+            'sample': ctx.get('sample_errors'),
+        }, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return repr(ctx)
+
+
 def _generate_async(ctx, tag):
     """在**后台线程**里跑 generate_response（0.3.39）。
 
     ⚠️ 为什么不能在 HTTP 请求线程里同步生成：generate_response 会走一次真实
-    的 DeepSeek 往返（response_generator 里的 OpenAI 客户端没传 timeout，
-    默认 600s + 2 次重试）。而扩展侧 postJsonToPet 的超时是 **500ms**
+    的 DeepSeek 往返。而扩展侧 postJsonToPet 的超时是 **500ms**
     （extension.ts）——请求线程一旦慢于它，扩展就 `req.destroy()`、判定
     delivered=false，于是：
 
@@ -622,27 +666,99 @@ def _generate_async(ctx, tag):
 
     改到后台线程后：/push 立刻回 200（扩展按时提交状态），桌宠 1~2 秒后
     说话 —— 本来就是异步气泡，晚一点到这才是符合直觉的时序。
+
+    ⚠️ 但 200 就意味着扩展**不会再补发**，所以这条链路上任何"没说出来"都
+    是永久丢失。三条不变量见上方 _gen_lock 处的说明：
+    失败必须回落到内置台词、同签名在途要丢弃、过期结果要作废。
     """
+    global _gen_seq, _gen_done_seq
+
+    if not isinstance(ctx, dict):
+        return
+    sig = _gen_signature(ctx)
+
+    with _gen_lock:
+        if sig in _gen_inflight:
+            # 同一件事还有一条没生成完：这一条直接丢掉，否则会说两遍
+            log('[airi-standalone] %s duplicate generation dropped' % tag)
+            return
+        if len(_gen_inflight) >= MAX_PENDING_GENERATIONS:
+            # 后端（LLM）挂住时不能无限起线程，宁可丢新保旧
+            log('[airi-standalone] %s dropped: %d generations still pending'
+                % (tag, len(_gen_inflight)))
+            return
+        _gen_seq += 1
+        my_seq = _gen_seq
+        _gen_inflight.add(sig)
+
+    def _fallback(exc=None):
+        """生成拿不到结果时的兜底：宁可说一句内置台词，也不能什么都不说。
+
+        扩展用 stdio:'ignore' 起进程、日志是唯一通道，而用户看的是气泡 ——
+        "静默丢单"在这条链路上等于"这件事从没发生过"。
+        """
+        if exc is not None:
+            log('[airi-standalone] %s generate failed: %r -> fallback' % (tag, exc))
+        else:
+            log('[airi-standalone] %s generated nothing -> fallback' % tag)
+        try:
+            ec = ctx.get('error_count', 0)
+            try:
+                ec = int(ec or 0)
+            except (TypeError, ValueError):
+                ec = 0
+            _builtin_reply(ec, str(ctx.get('trigger', 'diagnostics') or 'diagnostics'),
+                           ctx.get('file') or '', ctx.get('sample_errors'),
+                           str(ctx.get('reason', 'changed') or 'changed'))
+        except Exception as fb_exc:
+            log('[airi-standalone] %s fallback failed: %r' % (tag, fb_exc))
+
     def _run():
+        global _gen_done_seq
         try:
-            r = generate_response(ctx)
-        except Exception as exc:
-            # 扩展用 stdio:'ignore' 起进程，这里不落日志的话失败就是零痕迹
-            log('[airi-standalone] %s generate failed: %r' % (tag, exc))
-            return
-        if not r:
-            return
-        try:
-            payload = r.get('payload') or {}
-            text = payload.get('text', '')
-            if not text:
+            try:
+                r = generate_response(ctx)
+            except Exception as exc:
+                _fallback(exc)
                 return
-            push_message(r.get('type') or 'chatMessage', text,
-                         payload.get('emotion', 'idle'))
+            if not isinstance(r, dict):
+                # ⚠️ None 是"故意不说"的契约：heartbeat 这类触发本来就期望
+                # 静默（response_generator 里 `elif trigger == "heartbeat":
+                # return None`）。兜底绝不能把"决定不说"改成"说一句内置台词"，
+                # 否则桌宠会在每次心跳时自言自语。
+                if r is None and str(ctx.get('trigger') or '') == 'heartbeat':
+                    return
+                _fallback()
+                return
+            payload = r.get('payload')
+            if not isinstance(payload, dict):
+                _fallback()
+                return
+            text = payload.get('text', '')
+            if not isinstance(text, str) or not text.strip():
+                _fallback()
+                return
+            emotion = payload.get('emotion', 'idle')
+            mtype = r.get('type') or 'chatMessage'
+        finally:
+            with _gen_lock:
+                _gen_inflight.discard(sig)
+
+        with _gen_lock:
+            # 已经有更新的生成播报过 → 这条是过期的，丢掉（否则桌宠会
+            # 先说"干净了"再改口"还有 3 个 bug"）
+            if my_seq < _gen_done_seq:
+                log('[airi-standalone] %s stale result dropped (seq=%d < %d)'
+                    % (tag, my_seq, _gen_done_seq))
+                return
+            _gen_done_seq = my_seq
+        try:
+            push_message(mtype, text, emotion)
         except Exception as exc:
             log('[airi-standalone] %s push failed: %r' % (tag, exc))
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_run, daemon=True,
+                     name='airi-gen-%s-%d' % (tag, my_seq)).start()
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +838,7 @@ class AiriHandler(BaseHTTPRequestHandler):
             return None
         if length == 0:
             return ''
-        # 挡"声明合法但少发"：读超时到点就 400 收工，不让线程挂下去
+        # 挡"声明合法但少发"：整体预算到点就 400 收工，不让线程挂下去
         try:
             self.connection.settimeout(BODY_READ_TIMEOUT_SEC)
         except OSError:
