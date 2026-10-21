@@ -749,8 +749,15 @@ function createOrShowAssistantPanel(context: vscode.ExtensionContext): void {
 		'airiAssistant', 'deepseek Assistant', vscode.ViewColumn.Beside,
 		{ enableScripts: true, retainContextWhenHidden: true }
 	);
-	panel.webview.html = getWebviewHtml();
-	panel.onDidDispose(() => { panel = undefined; });
+	panel.webview.html = getWebviewHtml(STANDALONE_PORT);
+	panel.onDidDispose(() => {
+		// 顺手把自己从 subscriptions 里摘掉：不摘的话每"开→关"一轮就多留
+		// 一个已 dispose 的 WebviewPanel（连带它的 webview 资源句柄），
+		// 直到扩展停用都不会释放。
+		const i = context.subscriptions.indexOf(panel as unknown as vscode.Disposable);
+		if (i >= 0) { context.subscriptions.splice(i, 1); }
+		panel = undefined;
+	});
 	context.subscriptions.push(panel);
 }
 
@@ -759,7 +766,9 @@ function postToWebview(message: unknown): void {
 	void panel.webview.postMessage(message);
 }
 
-function getWebviewHtml(): string {
+function getWebviewHtml(port: number): string {
+	// 端口必须插值：用户可以用 AIRI_STANDALONE_PORT 换端口，写死 19876 会让
+	// 这块面板**在换过端口的环境里指错方向**，用户照着它排查就走岔了。
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"/><style>
@@ -774,7 +783,7 @@ h2{color:var(--accent);margin-bottom:8px;font-size:14px}
 .empty{color:var(--muted);font-size:12px;text-align:center;padding:20px}
 </style></head><body>
 <h2>deepseek Monitor</h2>
-<p class="status">诊断消息自动转发至桌宠 (port 19876)</p>
+<p class="status">诊断消息自动转发至桌宠 (port ${port})</p>
 <div id="list"><p class="empty">没有错误 — 一切正常</p></div>
 <script>
 const vscode=acquireVsCodeApi(),list=document.getElementById('list');
