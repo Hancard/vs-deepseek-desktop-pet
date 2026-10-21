@@ -89,6 +89,9 @@ def _nvl(value, fallback="?"):
     return value
 
 
+_last_pick = {}
+
+
 def pick_corpus(category: str, variables: dict = None) -> str:
     """从语料库中随机选取一条台词，并替换变量占位符
 
@@ -100,9 +103,21 @@ def pick_corpus(category: str, variables: dict = None) -> str:
     生效），`from corpus import FILE_SCAN` 绑的是**当初那个 list 对象**，用户
     改完文件这边还指着旧的，表现成"我改了怎么没生效"。
 
+    ⚠️ 不重复上一句（0.3.40）：bug 内容不变的周期提醒（reason='remind'，
+    扩展每 60s 一次）里，台词池和变量**完全一样**，纯 random.choice 会逐字
+    重复上一句 —— 实测 7 条的池子抽 40 次，出现 3~5 次连续重复，观感就是
+    复读机。standalone._pick_click_line 早就用 `_last_pick` 做了同样的去重
+    （点击路径），场景台词这条路径一直没覆盖。
     """
-    lines = corpus.get_lines(category)
-    text = random.choice(lines or corpus.ENCOURAGE)
+    lines = corpus.get_lines(category) or corpus.ENCOURAGE
+    # 池子只有一条时去重没有意义（也无从选择），直接返回
+    if len(lines) > 1:
+        prev = _last_pick.get(category)
+        pool = [ln for ln in lines if ln != prev] or lines
+        text = random.choice(pool)
+    else:
+        text = random.choice(lines)
+    _last_pick[category] = text
 
     if variables:
         for key, value in variables.items():
