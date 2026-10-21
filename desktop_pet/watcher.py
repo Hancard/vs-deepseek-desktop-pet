@@ -24,6 +24,7 @@ import subprocess
 import urllib.request
 import argparse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 
 # ---------------------------------------------------------------------------
@@ -228,17 +229,32 @@ def watch_directory(watch_dir: str, port: int):
                         del cache[key]
 
             # 对变化的文件运行语法检查并更新缓存。
-            # 每轮限流：git checkout / 切分支等场景几十个文件同时变化时，
-            # 顺序跑几十个编译器子进程（各 10s 超时）会把扫描卡住几分钟
+            #
+            # 两层限流（0.3.41）：
+            # ① 每轮最多检查 20 个 —— git checkout / 切分支时几十个文件同时
+            #    变 mtime，一次性全查会把扫描卡住。
+            # ② 这 20 个**并发**跑（最多 4 个） —— 只做 ① 不够：C/C++ 检查
+            #    是起 gcc/g++ 子进程（各 10s 超时），串行最坏 20×10=**200 秒**，
+            #    这三分多钟里 time.sleep(1.5) 和整棵树扫描一行都不会执行，
+            #    期间用户保存的 .py 也不播报、all_clear 也要等拖完才发。
+            #    并发 4 之后最坏降到 ~50s（Python 检查是进程内 compile，
+            #    本来就是毫秒级，占不住线程）。
             MAX_CHECKS_PER_SCAN = 20
-            for key, mtime in changed_files[:MAX_CHECKS_PER_SCAN]:
-                ext = os.path.splitext(key)[1].lower()
-                checker = CHECKERS.get(ext)
-                if checker is None:
-                    known_errors.pop(key, None)
+            CHECK_WORKERS = 4
+            batch = changed_files[:MAX_CHECKS_PER_SCAN]
+            if batch:
+                workers = min(CHECK_WORKERS, len(batch))
+                if workers > 1:
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        results = list(pool.map(lambda kv: _check_one(*kv), batch))
                 else:
-                    known_errors[key] = checker(key)
-                mtimes[key] = mtime  # 已检查才提交；顺延的文件下一轮重查
+                    results = [_check_one(*batch[0])]
+                for key, mtime, errs in results:
+                    if errs is None:
+                        known_errors.pop(key, None)
+                    else:
+                        known_errors[key] = errs
+                    mtimes[key] = mtime  # 已检查才提交；顺延的文件下一轮重查
             if len(changed_files) > MAX_CHECKS_PER_SCAN:
                 print(f'[watcher] {len(changed_files)} file(s) changed, '
                       f'checking {MAX_CHECKS_PER_SCAN} this round', flush=True)
