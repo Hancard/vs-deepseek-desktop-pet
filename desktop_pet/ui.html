@@ -1940,35 +1940,78 @@
     }
 
     /** 改周期：先本地渲染（点击要有立刻的反馈），再 POST 落盘。
-     *  真正生效的是扩展 —— 它 watch 这个设置文件，改完约 1 拍内切到新周期。 */
-    function setDetectSec(sec) {
-      var next = clampDetect(sec);
-      if (next === detectSec) return;
-      detectSec = next;
+     *  真正生效的是扩展 —— 它 watch 这个设置文件，改完约 1 拍内切到新周期。
+     *
+     *  ⚠️ 0.3.41 —— 服务端是 **多线程** 服务器（ThreadingHTTPServer），
+     *  响应**不保证按发出顺序返回**。之前这里和 syncDetectSec 都是
+     *  fire-and-forget、谁先回来谁生效，于是：右键开菜单（发 GET）后立刻点
+     *  chip（发 POST），若 POST 先被处理完，随后那个读到旧值的 GET 回来会
+     *  把界面**弹回旧值**——而服务端其实已经是新值了，界面开始说谎。
+     *  统一用自增 seq：只接受"我发出时序号最大的那个"响应。 */
+    var settingsSeq = 0;
+    var detectPostTimer = null;
+    var pendingDetectSec = null;
+
+    function detectFailed(prev, seq) {
+      if (seq !== settingsSeq) return;   // 已经有更新的操作了，别抢它的结果
+      detectSec = prev;                  // 回滚，别让界面停在一个假值上
       renderDetectLabels();
-      repushMenuRegion();      // 「1 秒」比「30 秒」窄，面板宽度变了就要重推 region
+      repushMenuRegion();
+      try { showBubble('周期没保存成功…再试一次？', true); } catch (e) {}
+    }
+
+    function postDetectSec(sec, prev) {
+      var seq = ++settingsSeq;
       try {
         fetch(SETTINGS_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ detectIntervalSec: detectSec })
+          body: JSON.stringify({ detectIntervalSec: sec })
         }).then(function(r) { return r.json(); }).then(function(d) {
-          if (!d) return;
+          if (seq !== settingsSeq) return;
+          if (!d) { detectFailed(prev, seq); return; }
           if (isFinite(d.min)) detectMin = d.min;
           if (isFinite(d.max)) detectMax = d.max;
+          // ⚠️ 200 不等于落盘成功：save_settings 写文件失败时返回
+          // `saved:false`（比如 ~/.dsh/pets 只读、os.replace 失败）。以前
+          // 不看这个字段 → 界面显示成功，桌宠行为纹丝不动，下次右键打开
+          // 菜单又被 syncDetectSec 弹回旧值，用户以为"设置自己跳回去了"。
+          if (d.saved === false) { detectFailed(prev, seq); return; }
           // 服务端才是权威（它夹过值）：不一致就对齐回来，别让界面说谎
           if (isFinite(d.detectIntervalSec)) {
             var v = clampDetect(d.detectIntervalSec);
             if (v !== detectSec) { detectSec = v; renderDetectLabels(); repushMenuRegion(); }
           }
-        }).catch(function() {});
-      } catch (err) {}
+        }).catch(function() { detectFailed(prev, seq); });
+      } catch (err) { detectFailed(prev, seq); }
+    }
+
+    function setDetectSec(sec) {
+      var next = clampDetect(sec);
+      if (next === detectSec) return;
+      var prev = detectSec;
+      detectSec = next;
+      renderDetectLabels();
+      repushMenuRegion();      // 「1 秒」比「30 秒」窄，面板宽度变了就要重推 region
+      // 连点「+」时每一下都会发一个 POST（10 连点 = 10 个并发写），最后落在
+      // 界面上的值取决于哪个响应最后到，和服务端最终值可能不一致。合并成
+      // 150ms 一次，只提交最后一次的值。
+      pendingDetectSec = next;
+      if (detectPostTimer) clearTimeout(detectPostTimer);
+      detectPostTimer = setTimeout(function() {
+        detectPostTimer = null;
+        var target = pendingDetectSec;
+        pendingDetectSec = null;
+        if (target !== null) postDetectSec(target, prev);
+      }, 150);
     }
 
     /** 打开菜单时用权威值复核一次缓存（页面里的值只是 load_html 注入的初值）。 */
     function syncDetectSec() {
+      var seq = ++settingsSeq;   // 与 POST 共用序号：后发的才能覆盖先发的
       try {
         fetch(SETTINGS_URL).then(function(r) { return r.json(); }).then(function(d) {
+          if (seq !== settingsSeq) return;   // 已经有更晚的请求了，丢弃这个旧答案
           if (!d) return;
           if (isFinite(d.min)) detectMin = d.min;
           if (isFinite(d.max)) detectMax = d.max;
