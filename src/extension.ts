@@ -375,12 +375,22 @@ async function pushPendingDiagnostics(): Promise<boolean> {
 	// 从未出现过受支持的错误时不推 all_clear（例如无关语言的诊断事件）
 	if (workspaceErrors.length === 0 && !hadRelevantErrors) { return true; }
 
+	// ⚠️ items 里的 message 必须与 file_scan 那条链路一样先截断（0.3.41）。
+	// 诊断消息可以非常长：C++ 模板实例化错误、clang-tidy 说明、Python 完整
+	// traceback 随便就是几 KB。file_scan 侧早就 clipMessage(60) 了，这条路径
+	// 却原样投喂 —— 20 条叠加后 POST body 能到几百 KB，既拖慢投递（更容易
+	// 撞 postJsonToPet 的 500ms 超时），也让每次签名比较都在序列化大字符串。
+	// 面板显示同样会糊成一片，所以这里连同 webview 一起用裁剪后的文本。
+	const items = workspaceErrors.slice(0, 20).map((e) => ({
+		...e, message: clipMessage(e.message, 200),
+	}));
+
 	const message = workspaceErrors.length > 0
 		? {
 			type: 'diagnostics' as const,
 			payload: {
 				count: workspaceErrors.length,
-				items: workspaceErrors.slice(0, 20),
+				items,
 				timestamp: new Date().toISOString(),
 				language: [...new Set(workspaceErrors.map((e) => e.languageId))].join(', '),
 			},
@@ -394,9 +404,11 @@ async function pushPendingDiagnostics(): Promise<boolean> {
 		};
 
 	// 相同错误状态不重复推送（避免每次诊断事件都让 Airi 重复吐槽）
+	// 签名用**裁剪后**的文本：和真正发出去的 items 保持一致，否则同一批
+	// 错误的签名会因为 message 里那些超长尾巴而无谓地变长
 	const signature = JSON.stringify([
 		(message as { type?: string }).type ?? (message as { trigger?: string }).trigger,
-		workspaceErrors.map((e) => `${e.file}|${e.line}|${e.message}`),
+		items.map((e) => `${e.file}|${e.line}|${e.message}`),
 	]);
 	if (signature === lastPushSignature) { return true; }
 
