@@ -1,5 +1,72 @@
 # Change Log
 
+## [0.3.40] — 2026-10-21
+
+### Fixed
+
+- **后台生成失败时静默丢单**（`standalone.py`）
+  0.3.39 把生成挪出请求线程后，`/push` 从此**无条件回 200** —— 而扩展拿到
+  200 就提交 `fileScanState` / `lastPushSignature`，再也不会补发。于是"生成
+  没说出话"在这条链路上等于"这件事从没发生过"。三种情形实测（修复前）
+  `sse_queue` 增量均为 0：生成抛异常 / 返回 `None` / 返回空文本。
+  修：失败一律回落到 `_builtin_reply()`，保证"收了 200 就一定说得出话"。
+  ⚠️ 兜底必须跳过 `heartbeat` —— `response_generator` 对它**故意返回 None**
+  表示"这次不说话"，把"决定不说"改成"说一句内置台词"会让桌宠每次心跳
+  都自言自语。
+- **同一件事被说两遍 / 过期结果推翻刚说过的话**（`standalone.py`）
+  后台生成既没有在途去重、也没有顺序保证。实测（修复前）：
+  ① 0.2 秒内连发两次同内容 `/push` → `sse_queue` 增量 = 2（两个 VS Code
+  窗口操作同一仓库时就是这个形状）；② 先 `file_scan`「还有 3 个 bug」、
+  用户改好后 `all_clear`「干净了」，慢的那条后到 → 播报顺序
+  `['干净了', '还有3个bug']`，桌宠自己推翻自己。
+  修：用 `(trigger, file, error_count, reason, sample_errors)` 做在途签名；
+  每次生成发单调序号，序号落后于已完成的最大号就直接丢弃。
+- **body 读预算只按单次 recv 计时，慢速滴字节仍能占死 handler 线程**
+  （`standalone.py`）0.3.39 加的 5 秒读超时是**单次 recv 的预算**：
+  `self.rfile` 是 `makefile('rb', -1)` 造的 `BufferedReader`，`read(n)` 内部
+  反复 recv 直到凑够 n 或 EOF，每次 recv 各自重新计超时。对端每 4 秒滴一个
+  字节就永远不触发。实测（修复前）跨源 POST 声明 64 字节：0.5s/字节 →
+  403 晚 **12.5s**；2s/字节 → 晚 **11.0s**（预算本该 5s）。
+  修：新增 `_read_bounded()`，用 `read1()`（只对底层流发一次读请求）把
+  "还要不要继续等"拿回自己手里，按**整体截止时间**逐轮驱动；两处读 body
+  的地方统一走它。修后实测两种滴速都在 **5.0s** 被释放。
+- **`resolve_port()` 在端口守卫之前写日志**（`standalone.py`）
+  `__main__` 里 `resolve_port()` 跑在 `_ping_ok()` 之前，而它自己会 `log()`。
+  实测（修复前）：实例已在运行、`AIRI_STANDALONE_PORT=0` 再启动 → 进程秒退，
+  但日志被追加 98 字节的 `out of range`，且没有本次的 `--- boot ---`，
+  看不出是哪个进程写的 —— 正好绕过了 0.3.39 刚立下的"第二个进程不写日志"。
+  修：只攒进 `_port_warning`，由 `main()` 在守卫放行后 `flush_port_warning()`。
+- **`sample_errors` 传标量让整条播报变成空气泡**（`response_generator.py`）
+  实测 `sample_errors=5` → `TypeError: 'int' object is not iterable`，异常冒出
+  `generate_response`，用户一句话都收不到，下次提醒要等满 60s 冷却。
+- **`sample_errors` 字段为 null 时念出 "第 None 行：None"**
+  （`response_generator.py`）`dict.get(k, default)` 只在**键不存在**时给
+  默认值，键存在但值是 JSON `null` 时返回 `None`。实测气泡原文：
+  `a.py 里还有 2 个 bug… 第None行：None`。
+  ⚠️ 修的时候不能用 `or` 兜底：行号**真可以是 0**，`or` 会把合法值吃掉。
+- **`error_count` 归一化后没回写 context**（`response_generator.py`）
+  `generate_response` 把 `int(error_count)` 只放进局部变量就交给
+  `try_deepseek_api`，后者读的是 context 里的原始值 —— `error_count="3"`
+  时 `str > int` 抛 TypeError，被裸 `except Exception: pass` 吞掉，表现为
+  "配了 API key 却永远只说内置台词"且零提示。
+- **DeepSeek 客户端没有超时**（`response_generator.py`）不传 `timeout` →
+  httpx 默认 600s + `max_retries=2`，网络不通时一次生成最坏挂约 30 分钟。
+  0.3.39 之后它跑在后台线程，不拖请求但线程一直堆着。修：`timeout=8.0`、
+  `max_retries=1`。
+- **周期提醒会逐字重复上一句台词**（`response_generator.py`）bug 内容不变
+  的周期提醒（`reason='remind'`，每 60s 一次）里台词池和变量完全一样，
+  `random.choice` 没有记忆。实测 7 条的池子连抽 40 次，出现 3~5 次与上一句
+  逐字相同。`_pick_click_line`（点击路径）早就有这个去重，场景台词没覆盖。
+
+### Tests
+
+- `live2d_probe/test_pet_040.py`（32 条）：A 段后台生成三条不变量（含
+  heartbeat 静默这条反向断言）、B 段读预算整体截止时间（含 200KB 合法包
+  不被误伤的反向断言）、C 段告警落盘时机、D 段后端输入加固与去重。
+  **判断力已验证**：对 0.3.39 跑是 **18 条 FAIL**，修完 32 条全绿。
+- `test_pet_039.py` 的 A7（穷举"不该有漏网的裸 `rfile.read`"）跟着改：
+  入口从两处合并成 `_read_bounded` 一处，断言要反映新架构。
+
 ## [0.3.39] — 2026-10-20
 
 ### Fixed
