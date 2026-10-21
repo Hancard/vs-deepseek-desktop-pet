@@ -134,6 +134,39 @@ CHECKERS = {
     '.cxx': check_c, '.cc': check_c,
 }
 
+# 跳过隐藏目录和虚拟环境
+SKIP_PARTS = ('node_modules', 'venv', '__pycache__', 'build', 'dist', '.git')
+
+
+def should_skip(rel_parts) -> bool:
+    """是否跳过这个**相对**路径（rel_parts = 相对监听根的各段）。
+
+    ⚠️ 0.3.41 —— 判据只能作用在**监听根之下**的那几段上。以前这里传的是
+    绝对路径的 `f.parts`，于是监听根**之上**的祖先目录也被一起判了：
+
+        · 任何以 `.` 开头的祖先（.workbuddy / .cache / .cursor / .vscode…）
+        · 或者祖先里有 build / dist / venv / node_modules
+
+    都会让**每一个文件**都被跳过 —— rglob 照常跑、启动信息照常打印，
+    然后 `changed_files` 永远是空的：桌宠从此一声不响，用户既看不到错误
+    也看不到任何提示，完全无从判断是"没监听"还是"代码没 bug"。
+
+    实测（`probe_041.py` A 段）：
+      · 监听根 `.../Temp/.probe_root_xxx/proj` 下放 3 个 .py → 旧写法扫到
+        **0** 个，相对写法扫到 3 个
+      · 真实目录 `~/.workbuddy` 下 4468 个 .py → 旧写法存活 **0** 个
+    """
+    return any(part.startswith('.') or part in SKIP_PARTS for part in rel_parts)
+
+
+def _check_one(key: str, mtime: float):
+    """检查单个文件，返回 (key, mtime, errors)；errors=None 表示从缓存摘掉"""
+    ext = os.path.splitext(key)[1].lower()
+    checker = CHECKERS.get(ext)
+    if checker is None or not os.path.isfile(key):
+        return (key, mtime, None)
+    return (key, mtime, checker(key))
+
 
 def watch_directory(watch_dir: str, port: int):
     """轮询监听目录中的文件变化"""
@@ -160,9 +193,8 @@ def watch_directory(watch_dir: str, port: int):
             # 扫描所有支持的文件
             for ext in SUPPORTED:
                 for f in watch_path.rglob(f'*{ext}'):
-                    # 跳过隐藏目录和虚拟环境
-                    if any(part.startswith('.') or part in ('node_modules', 'venv', '__pycache__', 'build', 'dist', '.git')
-                           for part in f.parts):
+                    # 只对监听根**之下**的相对部分做过滤（见 should_skip 注释）
+                    if should_skip(f.relative_to(watch_path).parts):
                         continue
                     key = str(f)
                     seen.add(key)
