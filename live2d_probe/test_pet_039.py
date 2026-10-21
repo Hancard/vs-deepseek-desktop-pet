@@ -103,11 +103,20 @@ check('A4 _drain_body 夹了 MAX_BODY_BYTES 上限',
 check('A5 _drain_body 设了读超时',
       'settimeout(BODY_READ_TIMEOUT_SEC)' in _seg_drain)
 check('A6 _drain_body 读完把超时恢复成阻塞', 'settimeout(None)' in _seg_drain)
-# 穷举：除了 _read_body 与 _drain_body 内部各一处，不该再有别的裸 rfile.read
-# （注释/文档串里提到的 `self.rfile.read(...)` 不算 —— 只数真正的赋值调用）
-_naked = re.findall(r'=\s*self\.rfile\.read\(', SRC)
-check('A7 真正的 rfile.read 只剩两处（_read_body / _drain_body 各一）',
-      len(_naked) == 2, 'count=%d' % len(_naked))
+# 穷举：所有 rfile.read 必须收在同一个受预算约束的入口里。
+# 0.3.39 时是 _read_body / _drain_body 各一处（两处各自的 settimeout）；
+# 0.3.40 把两者合并成 _read_bounded —— 因为两处各写一遍超时逻辑时，
+# _read_body 那份漏掉了"整体截止时间"（只有 per-recv 预算，慢速滴字节
+# 照样挂死）。现在应当**只有一处**，且位于 _read_bounded 之内。
+# 只数真正的赋值语句（注释/文档串里提到的 `self.rfile.read(...)` 不算）
+_naked = re.findall(r'^\s*\w+\s*=\s*self\.rfile\.read\(', SRC, re.M)
+check('A7 所有 rfile.read 收在同一个入口里（0.3.40 起是 _read_bounded）',
+      len(_naked) == 1, 'count=%d' % len(_naked))
+check('A7b 那唯一的 rfile.read 位于 _read_bounded 内部',
+      'def _read_bounded(' in SRC
+      and SRC.index('self.rfile.read(') > SRC.index('def _read_bounded('),
+      'read@%d vs def@%s' % (SRC.find('self.rfile.read('),
+                             SRC.find('def _read_bounded(')))
 
 out('')
 out('=== A2. 端口与生成链路的静态契约 ===')

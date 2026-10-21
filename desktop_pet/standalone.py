@@ -799,6 +799,46 @@ class AiriHandler(BaseHTTPRequestHandler):
         if origin and _origin_allowed(origin):
             self.send_header('Access-Control-Allow-Origin', origin)
 
+    def _read_bounded(self, nbytes):
+        """在**整体** BODY_READ_TIMEOUT_SEC 预算内读 nbytes 字节。
+
+        返回 bytes（可能不足 nbytes，表示对端提前关了）；预算耗尽或读失败
+        返回 None。
+
+        ⚠️ 为什么不能直接 `self.rfile.read(n)` + `settimeout`：rfile 是
+        `makefile('rb', -1)` 造出来的 **BufferedReader**，`read(n)` 内部会
+        反复调 recv 直到凑够 n 字节或 EOF，而**每次 recv 各自重新计超时** ——
+        只要对端字节到得比超时快（每 4 秒 1 字节就够），`socket.timeout`
+        永远不触发。0.3.40 实测：声明 64 字节、每 2 秒发 1 字节，跨源 403
+        晚了 **11 秒**才写出来（预算本该是 5 秒），也就是说 0.3.39 想封的
+        那个洞只在"一字节都不发"时被封住了。
+
+        所以这里用 `read1()` —— 它**只对底层流发一次读请求**，返回多少算
+        多少，把"还要不要继续等"的决定权交回本函数的截止时间判断。
+        """
+        deadline = time.monotonic() + BODY_READ_TIMEOUT_SEC
+        read1 = getattr(self.rfile, 'read1', None)
+        buf = bytearray()
+        while len(buf) < nbytes:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None                     # 整体预算耗尽
+            try:
+                self.connection.settimeout(left)
+            except OSError:
+                pass
+            try:
+                if read1 is not None:
+                    chunk = read1(nbytes - len(buf))
+                else:
+                    chunk = self.rfile.read(min(nbytes - len(buf), 65536))
+            except (socket.timeout, TimeoutError, OSError):
+                return None
+            if not chunk:
+                break                           # 对端提前关了连接
+            buf += chunk
+        return bytes(buf)
+
     def _read_body(self):
         """读请求体。**返回 None 表示已经回过响应了，调用方直接 return。**
 
@@ -844,19 +884,24 @@ class AiriHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
         try:
-            raw = self.rfile.read(length)
+            raw = self._read_bounded(length)
         except (socket.timeout, TimeoutError, OSError) as exc:
+            raw = None
             log('[airi-http] body read failed (%s): %r'
                 % (type(exc).__name__, exc))
-            self.send_response(400)
-            self.end_headers()
-            return None
         finally:
             # SSE 长连接不能带着读超时跑，读完必须恢复成阻塞
             try:
                 self.connection.settimeout(None)
             except OSError:
                 pass
+        if raw is None or len(raw) < length:
+            log('[airi-http] body read incomplete (%s/%d bytes, timeout=%.1fs)'
+                % ('none' if raw is None else len(raw), length,
+                   BODY_READ_TIMEOUT_SEC))
+            self.send_response(400)
+            self.end_headers()
+            return None
         return raw.decode('utf-8', errors='replace')
 
     def _drain_body(self):
@@ -880,17 +925,16 @@ class AiriHandler(BaseHTTPRequestHandler):
             return
         if remaining <= 0:
             return
+        # 与 _read_body 同一个按整体截止时间驱动的入口（理由见那里的注释：
+        # 单次 settimeout 挡不住"慢速滴字节"）。超过上限的部分不排 ——
+        # 超限的跨源请求本来就是畸形输入，剩下的字节由连接关闭处理。
         remaining = min(remaining, MAX_BODY_BYTES)
         try:
             self.connection.settimeout(BODY_READ_TIMEOUT_SEC)
         except OSError:
             pass
         try:
-            while remaining > 0:
-                chunk = self.rfile.read(min(remaining, 65536))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
+            self._read_bounded(remaining)
         except (socket.timeout, TimeoutError, OSError):
             pass
         finally:
