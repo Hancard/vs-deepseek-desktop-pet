@@ -586,7 +586,24 @@ function findPythonPath(): string {
 	return 'python';
 }
 
-async function launchStandalonePet(): Promise<void> {
+/** 启动中的 Promise（并发守卫，见 launchStandalonePet 注释） */
+let launchingPet: Promise<void> | undefined;
+
+/** 启动独立桌宠。重复调用返回同一个 Promise，不会 spawn 第二个进程。 */
+function launchStandalonePet(): Promise<void> {
+	// ⚠️ 0.3.41 —— 下面那段"等服务器起来"最多要跑 8 秒，期间
+	// checkStandaloneAlive() 一直返回 false（端口还没 bind）。用户最常见的
+	// 操作恰恰是"点了没反应，再点一下"：第二次调用会**完整地再走一遍
+	// spawn**，于是同时有两个 python.exe（第二个 bind 失败，要等它自己的
+	// 5 秒守卫 + _ping_ok 才退出），并且用户会收到两条一模一样的
+	// "桌宠已启动"通知。用 Promise 把整段包住即可。
+	if (launchingPet) { return launchingPet; }
+	launchingPet = doLaunchStandalonePet();
+	void launchingPet.finally(() => { launchingPet = undefined; });
+	return launchingPet;
+}
+
+async function doLaunchStandalonePet(): Promise<void> {
 	// ⚠️ 必须先**强制重新探测**（v0.3.33）。checkStandaloneAlive() 用的是最长
 	// 15 秒的缓存，桌宠刚死的那段时间里它还是 true —— 用户点状态栏只会看到
 	// "已经在运行了"，然后什么都没发生（要等下一次 10s 的状态栏轮询把缓存
