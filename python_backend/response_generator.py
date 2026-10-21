@@ -120,9 +120,15 @@ def try_deepseek_api(context: dict) -> Optional[str]:
     try:
         from openai import OpenAI
 
+        # ⚠️ 必须给超时（0.3.40）：OpenAI 客户端默认 httpx timeout=600s 且
+        # max_retries=2 —— 网络不通/被墙时一次生成最坏挂 ~30 分钟。0.3.39 把
+        # 生成挪到了后台线程，请求线程不再被拖住，但线程本身会一直堆在那儿
+        #（并在几十分钟后突然弹出一句与当时代码完全无关的台词）。8 秒足够。
         client = OpenAI(
             api_key=api_key,
             base_url="https://api.deepseek.com",
+            timeout=8.0,
+            max_retries=1,
         )
 
         from character import SYSTEM_PROMPT
@@ -203,6 +209,13 @@ def generate_response(context: dict) -> dict:
         error_count = int(context.get("error_count", 0) or 0)
     except (TypeError, ValueError):
         error_count = 0
+    # ⚠️ 必须回写（0.3.40）：try_deepseek_api 读的是 **context 里的原始值**，
+    # 不回写的话 error_count="3"（字符串）到那边就是 `str > int` → TypeError
+    # 被 167 行吞掉 → 静默回落本地语料，表现为"配了 API key 却永远只说内置
+    # 台词"且毫无提示。同理 files 可能是 None。
+    context["error_count"] = error_count
+    if not isinstance(context.get("files"), (list, tuple)):
+        context["files"] = []
     language = context.get("language", "python")
     # sample_errors 元素不一定是 dict（外部 /push 可传字符串数组），
     # 统一归一化成 dict，categorize_errors / try_deepseek_api 都按 dict 消费
