@@ -1547,8 +1547,10 @@
     var CARD_PAD = 10;    // 外接框再放一圈，别把抗锯齿边缘切掉
     var CARD_PAD_ALL = 14;  // 连名牌一起包时留宽一点，文字别贴着卡边
     var CARD_SAMPLES = 6; // 前 6 次取样（约 3 秒）取并集后**锁定**，见下面的说明
+    var CARD_MAX_FAILURES = 20;  // 视口取不到时的重试上限，见 updateCharCard
     var cardUnion = null;
     var cardSamples = 0;
+    var cardFailures = 0;
 
     function updateCharCard(rects) {
       if (CHAR_CARD === 'off' || !charCard || !rects || !rects.length) return;
@@ -1591,8 +1593,15 @@
 
       var vw = document.documentElement.clientWidth || window.innerWidth || 0;
       var vh = document.documentElement.clientHeight || window.innerHeight || 0;
-      if (!vw || !vh) { cardSamples = CARD_SAMPLES - 1; return; }
-      if (!(u[2] > u[0]) || !(u[3] > u[1])) { cardSamples = CARD_SAMPLES - 1; return; }
+      // ⚠️ 0.3.41 —— 以前这两条失败分支写的是 `cardSamples = CARD_SAMPLES - 1`
+      // （回退到 5），于是下一轮 `cardSamples >= CARD_SAMPLES` 又是 false，
+      // **永远锁不定**：只要视口尺寸恒取不到（窗口还没创建完 / 极端 DPI），
+      // 每 500ms 就重跑一次完整的 characterRects()（两次全画布 readPixels +
+      // drawImage），永久 CPU 空转，cardUnion 还会随 idle 呼吸一直并集膨胀。
+      // 改成"失败次数封顶"：重试 20 次仍不行就彻底放弃并锁定。
+      if (!vw || !vh) { if (++cardFailures >= CARD_MAX_FAILURES) cardSamples = CARD_SAMPLES; return; }
+      if (!(u[2] > u[0]) || !(u[3] > u[1])) { if (++cardFailures >= CARD_MAX_FAILURES) cardSamples = CARD_SAMPLES; return; }
+      cardFailures = 0;
 
       var pad = (CHAR_CARD === 'all') ? CARD_PAD_ALL : CARD_PAD;
       var w = (u[2] - u[0]) + pad * 2;
@@ -1803,7 +1812,11 @@
                             rects: res.rects, meta: res.meta } : null
             }
           })
-        });
+        }).catch(function() { /* 服务器不可达：这是唯一一条没有 .catch 的
+              fetch（reportJS / setDetectSec / syncDetectSec / edit-corpus 都
+              有），fetch 的**异步**拒绝逃得过外面的 try/catch —— 会被全局
+              unhandledrejection 兜住，再反过来上报一条 'jsError: Failed to
+              fetch'，把真正的失败原因淹没在噪音里 */ });
       } catch (err) { /* 诊断失败绝不能影响主流程 */ }
     }
 
@@ -2080,7 +2093,15 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ openCorpus: true })
-          }).then(function(r) { return r.json(); }).catch(function() {});
+          }).then(function(r) { return r.json(); }).then(function(d) {
+            // 请求**到达** Python 时由它推结果气泡（它要等扩展回执、还可能
+            // 三层回落）；但请求压根没到达（服务不可达 / 被 CORS 护栏挡掉）
+            // 时 Python 那边什么都不会发生 —— 菜单收起、然后一片死寂，
+            // 用户只能反复点，前后端日志里都零痕迹。这条气泡就是补这个洞。
+            if (d && d.ok === false) { showBubble('没能打开语料文件…', true); }
+          }).catch(function() {
+            try { showBubble('没能打开语料文件…', true); } catch (e) {}
+          });
         } catch (err) {}
       }
       if (a === 'exit') {
