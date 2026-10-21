@@ -55,7 +55,9 @@ let extensionRoot = '';
 /**
  * 支持监控的语言 ID 集合
  */
-const supportedLanguageIds = new Set(['c', 'cpp', 'python']);
+// exported：src/test/extension.test.ts 会断言这个集合（以前那条用例是在
+// 测试文件里另抄一份字面量自己断言自己，恒真、零覆盖）。
+export const supportedLanguageIds = new Set(['c', 'cpp', 'python']);
 
 /**
  * 独立桌宠服务器 (standalone.py) 端口（可用环境变量 AIRI_STANDALONE_PORT 覆盖）

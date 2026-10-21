@@ -8,6 +8,7 @@
 
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import { supportedLanguageIds } from '../extension';
 
 suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
@@ -50,13 +51,21 @@ suite('Extension Test Suite', () => {
 	});
 
 	/**
-	 * 验证支持的语言 ID 集合
+	 * 验证支持的语言 ID 集合。
+	 *
+	 * ⚠️ 0.3.41 —— 以前这里是在测试文件里另抄一份 `['c','cpp','python']`
+	 * 然后断言它包含 c/cpp/python：把字面量改成 ['rust','go','ts'] 依旧
+	 * 全绿，测不到任何产品代码。现在直接断言被测模块的真实集合，并且
+	 * **反向**断言（javascript 不在其中）也有了意义 —— 它防的是
+	 * `supportedLanguageIds` 被误改成"全语言通吃"。
 	 */
 	test('should support C, C++, and Python language IDs', () => {
-		const supportedLanguages = ['c', 'cpp', 'python'];
-		assert.strictEqual(supportedLanguages.includes('c'), true);
-		assert.strictEqual(supportedLanguages.includes('cpp'), true);
-		assert.strictEqual(supportedLanguages.includes('python'), true);
-		assert.strictEqual(supportedLanguages.includes('javascript'), false);
+		assert.strictEqual(supportedLanguageIds.has('c'), true, 'c not supported');
+		assert.strictEqual(supportedLanguageIds.has('cpp'), true, 'cpp not supported');
+		assert.strictEqual(supportedLanguageIds.has('python'), true, 'python not supported');
+		assert.strictEqual(supportedLanguageIds.has('javascript'), false,
+			'javascript should not be supported');
+		assert.strictEqual(supportedLanguageIds.size, 3,
+			`unexpected set: ${[...supportedLanguageIds].join(',')}`);
 	});
 });
