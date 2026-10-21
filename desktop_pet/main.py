@@ -104,6 +104,15 @@ def main():
         else:
             print('[airi-dwm] WARNING: 没能关掉 Mica backdrop')
 
+        # ⚠️ 配置就是"别动底色"时不要再重试（0.3.41）：fix_window_background()
+        # 在 win_bg_mode()=='off' 时**必然**返回 (False, 'AIRI_WIN_BG=off
+        # （不动底色）')，而这个循环只认 ok，于是白白把 10 秒（40 × 0.25s）
+        # 跑满，最后还打出一条并不是故障的 WARNING —— 用户被误导，启动也
+        # 平白多花 10 秒（前面还有 20 秒的 Mica 循环）。
+        if win_bg_mode() == 'off':
+            print(f'[airi-winbg] skipped: {win_bg_mode()}（按配置不动底色）')
+            return
+
         bg_deadline = time.time() + 10
         while time.time() < bg_deadline:
             ok, detail = fix_window_background(window)
