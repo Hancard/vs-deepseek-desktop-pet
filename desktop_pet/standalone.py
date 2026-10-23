@@ -497,6 +497,9 @@ def _origin_allowed(origin):
 # ---------------------------------------------------------------------------
 MAX_QUEUE_SIZE = 200
 SSE_REPLAY_COUNT = 20   # 新连接重播最近的消息数（含启动问候）
+# SSE 空闲心跳间隔：轮询是 0.3s 一拍，50 拍 = 15 秒。它是断连探测（见
+# do_GET 的 /sse 分支），太密是白耗、太疏则断连线程滞留得久。
+SSE_HEARTBEAT_TICKS = 50
 
 # 请求体上限与读超时：挡住"畸形 Content-Length 把 handler 线程永久挂死"
 # （详见 AiriHandler._read_body 的注释）。桌宠的消息最大也就几 KB，1 MB 是
@@ -1012,6 +1015,18 @@ class AiriHandler(BaseHTTPRequestHandler):
                 for _seq_no, d in replay:
                     self.wfile.write(f'id: {_seq_no}\ndata: {d}\n\n'.encode('utf-8'))
                 self.wfile.flush()
+                # ⚠️ 空闲时要主动写心跳（0.3.42）。
+                # 这个循环唯一的退出点以前是"写消息时抛异常"，而 wfile 是
+                # makefile('wb', 0)（无缓冲）：对端 FIN 之后的**第一次** send
+                # 通常仍然成功，要到第二次才抛 ConnectionResetError。桌宠空闲
+                # 时可能几小时没有消息 —— 于是每次 SSE 重连（前端重连就
+                # `new EventSource()` 一次）都遗留一个常驻线程 + 一个没关的
+                # socket，直到进程退出才回收，而且 `except Exception: pass`
+                # 让日志一行痕迹都没有。
+                # 心跳是一石二鸟：写失败立刻发现断连并 return；写成功则顺带
+                # 让中间设备（代理/防火墙的空闲连接回收）不要静默掐断长连接。
+                # 冒号开头是 SSE 的注释行，客户端 EventSource 不会把它当事件。
+                _idle_ticks = 0
                 while True:
                     time.sleep(0.3)
                     with queue_lock:
@@ -1024,6 +1039,18 @@ class AiriHandler(BaseHTTPRequestHandler):
                             self.wfile.flush()
                         except Exception:
                             return
+                    if new_msgs:
+                        _idle_ticks = 0
+                        continue
+                    _idle_ticks += 1
+                    if _idle_ticks < SSE_HEARTBEAT_TICKS:
+                        continue
+                    _idle_ticks = 0
+                    try:
+                        self.wfile.write(b':hb\n\n')
+                        self.wfile.flush()
+                    except Exception:
+                        return
             except Exception:
                 pass
         elif self.path == '/ping':
