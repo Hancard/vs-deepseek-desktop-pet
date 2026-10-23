@@ -249,14 +249,22 @@ class WindowAPI:
         """
         if self._window is None:
             self._log_input('get_position -> no window')
-            return [0, 0]
+            # ⚠️ 失败必须返回 None，不能返回 [0, 0]（0.3.43）。
+            # [0,0] 是一个**看起来完全合法**的坐标：前端 applyPos 只挡
+            # `!pos` 和"是不是数字"，两个条件都通过，于是 winStartX/Y 被
+            # 写成 0/0；下一次 pointermove 用「鼠标位置 − 0」算出位移，
+            # 窗口直接跳到屏幕左上角（再被钳制捞回来，观感是"拖拽时突然
+            # 蹦一下"）。前端早就写好了 `if (!pos) return;` 这条路径，
+            # 是后端的错误码把它堵死了 —— 0.3.38 只修了"0 被当假值丢掉"
+            # 那一半，没修"用 0 当错误码"这一半。
+            return None
         try:
             x = self._window.x
             y = self._window.y
             pos = [0 if x is None else int(x), 0 if y is None else int(y)]
         except Exception as exc:
             self._log_input('get_position failed: %r' % (exc,))
-            pos = [0, 0]
+            return None
         self._log_input('get_position -> %s' % pos)
         return pos
 
@@ -305,12 +313,28 @@ class WindowAPI:
             self._log_input('move_window FAILED %r' % (exc,))
 
     def exit_app(self):
-        """销毁窗口并退出进程（webview.start 返回后主线程结束，daemon 线程随之退出）"""
+        """销毁窗口并退出进程（webview.start 返回后主线程结束，daemon 线程随之退出）
+
+        ⚠️ 这是**唯一的逃生口**，它的失败必须留痕、也必须真的能退（0.3.43）。
+        以前是裸 `except Exception: pass`：destroy() 抛异常（窗口已被销毁、
+        pywebview 跨线程调用失败）时函数静默返回，窗口还在、进程还在，日志里
+        一行都没有 —— 用户点「退出」什么也没发生，只能去任务管理器杀进程。
+        同文件里 ping / get_position / move_window / pet_click /
+        set_window_region 失败都会留一行日志，只有这条不留。
+        """
         try:
             if self._window is not None:
                 self._window.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_input('exit_app destroy FAILED %r -> hard exit' % (exc,))
+            # destroy 都失败了，常规退出路径（webview.start 返回）大概率
+            # 也走不完。用户按的是"退出"，那就必须退出 —— 宁可少做清理。
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os._exit(0)
 
     # ------------------------------------------------------------------
     # 点击互动
@@ -865,7 +889,17 @@ def _apply_window_region(window, rects, vw, vh):
         rc2 = gdi32.CombineRgn(h_total, h_total, h_piece, RGN_OR)
         # 合并成功后 piece 归 h_total 所有，必须删掉 piece 句柄防泄漏
         gdi32.DeleteObject(h_piece)
-        return rc2 != 0      # 0 = ERROR（失败），其余都是成功（含 NULLREGION）
+        # ⚠️ 只有 SIMPLEREGION(2) / COMPLEXREGION(3) 才算"这块真的并进去了"
+        # （0.3.43）。NULLREGION(1) 表示合并结果是**空区域** —— 以前用
+        # `rc2 != 0` 把它算成功，而 kept 的唯一作用就是 `if not kept` 那道
+        # "不许把空 region 设到窗口上"的防线。于是当所有块都是空的时候：
+        # 气泡贴到窗口底边时尾巴三角形三个点被 _clip_y 钳成共线，
+        # CreatePolygonRgn 会返回一个**合法但空**的句柄（不是 0，所以
+        # `if not h_piece: continue` 也拦不住），CombineRgn 返回 NULLREGION，
+        # kept 却 > 0 → SetWindowRgn 把空区域装上窗口：
+        #   窗口整个不可见、鼠标完全点不到（连右键菜单都打不开 → 退不出去）。
+        # 0.3.38 只堵了 ERROR(0) 这一种失败形态，NULLREGION 是同一个洞的另一半。
+        return rc2 >= 2
 
     try:
         for entry in rects:
