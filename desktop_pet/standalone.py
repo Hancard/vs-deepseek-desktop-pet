@@ -511,6 +511,25 @@ sse_queue = []          # [(seq, json_str)]
 _seq = 0
 queue_lock = threading.Lock()
 
+def _as_text(value) -> str:
+    """把外部 POST 来的"文本"归一化成真的 str（0.3.42）。
+
+    外部 POST 的内容不可信：传数字/对象时前端 typeText 的 charAt 会直接抛
+    TypeError（气泡空白 + jsError 黑匣子报警），所以非字符串一律序列化成
+    可读文本。以前这段只写在 /push 的 payload 分支里，而同一段注释承诺的
+    "绝不让畸形 payload 炸穿链路"在 chatMessage 那条分支上没兑现 ——
+    `{"message": {"a": 1}}` 会原样进 SSE，前端 showBubble 判定对象为真值，
+    气泡里念出 `[object Object]`。抽出来两个分支共用。
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    if value is None:
+        return ''
+    return str(value)
+
+
 def push_message(msg_type: str, text: str, emotion: str = "idle"):
     """向 SSE 客户端推送消息。超过上限时丢弃最旧的消息。"""
     global _seq
@@ -1089,13 +1108,7 @@ class AiriHandler(BaseHTTPRequestHandler):
             p = msg.get('payload')
             if isinstance(p, dict) and 'text' in p:
                 t = msg.get('type', 'chatMessage')
-                tx = p['text']
-                # 外部 POST 的内容不可信：text 传数字/对象时，前端 typeText 的
-                # charAt 会直接抛 TypeError（气泡空白 + jsError 黑匣子报警）。
-                # 非字符串一律序列化成可读文本，绝不让畸形 payload 炸穿链路。
-                if not isinstance(tx, str):
-                    tx = json.dumps(tx, ensure_ascii=False) if (
-                        isinstance(tx, (dict, list))) else str(tx)
+                tx = _as_text(p['text'])
                 em = p.get('emotion', 'idle')
                 push_message(t, tx, em)
             elif msg.get('type') == 'diagnostics' and isinstance(p, dict):
@@ -1132,7 +1145,10 @@ class AiriHandler(BaseHTTPRequestHandler):
                                    msg.get('file'), msg.get('sample_errors'),
                                    str(msg.get('reason', 'changed') or 'changed'))
             else:
-                push_message('chatMessage', msg.get('message', body), 'idle')
+                # ⚠️ 这条分支同样要归一化（0.3.42）：`{"message": {"a": 1}}`
+                # 会走到这里，dict 原样进 SSE 后前端念出 [object Object]
+                # （见 _as_text 的注释）。
+                push_message('chatMessage', _as_text(msg.get('message', body)), 'idle')
             self._json_response({'status': 'pushed'})
         elif self.path == '/event':
             body = self._read_body()
