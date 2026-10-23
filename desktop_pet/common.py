@@ -267,28 +267,38 @@ class WindowAPI:
         self._move_calls += 1
         if self._move_calls == 1 or self._move_calls % 60 == 0:
             self._log_input('move_window #%d -> (%s,%s)' % (self._move_calls, x, y))
+        # ⚠️ 钳制必须**单独**包一层 try（0.3.42）：以前它和下面的
+        # self._window.move() 在同一个 try 里，于是"钳制失败就按原坐标移"
+        # 这句注释只是注释 —— 钳制里任何一处抛异常都直接跳到 except，
+        # move() 一次都不执行，窗口**完全不动**，只有一条 move_window FAILED。
+        # 实测触发点：pywebview 的 Window.width 是 property，内部
+        # gui.get_size(uid) 在 BrowserView.instances 里查不到该 uid 时返回
+        # None（窗口已 destroy 时就会），`int(None or 300)` 之外的解包直接
+        # TypeError。典型场景是用户点「退出」后，js_api 队列里还剩几帧
+        # pointermove（前端每帧都发）—— 那几帧本该丢掉，却把更早排队的
+        # move 也一起吞了，表现为拖拽丢帧/跳一下。
         try:
-            # 拖拽钳制：至少留 60px 在虚拟桌面内，防止把桌宠拖出屏幕找不回来。
-            # 钳制失败（非 Windows/度量异常）就按原坐标移 —— 移动永远不能挂。
-            #
-            # 坐标系必须统一（v0.3.15）：x/y 与 win_w/win_h 来自 pywebview，
-            # 是**逻辑像素**；get_virtual_screen() 在 DPI-aware 进程里给的是
-            # **物理像素**。150% 缩放下直接拿物理边界钳逻辑坐标，右/下边界
-            # 的钳制永远够不到（逻辑值 < 物理边界）→ 等于没有钳制，桌宠
-            # 照样能被拖出屏幕。先把边界除以 scale 转成逻辑再钳。
             vs = get_virtual_screen()
             if vs is not None:
-                win_w = int(getattr(self._window, 'width', 0) or 300)
-                win_h = int(getattr(self._window, 'height', 0) or 450)
-                hwnd = None
                 try:
-                    hwnd = self._window.native.Handle
-                except Exception:
+                    win_w = int(getattr(self._window, 'width', 0) or 300)
+                    # 默认高从 450 对齐到 480：standalone 建窗用的就是
+                    # 300x480（v0.3.15），两处不一致会让钳制边界差 30px。
+                    win_h = int(getattr(self._window, 'height', 0) or 480)
                     hwnd = None
-                scale = get_dpi_scale(hwnd)
-                if scale != 1.0:
-                    vs = tuple(v / scale for v in vs)
-                x, y = clamp_to_virtual_screen(int(x), int(y), win_w, win_h, vs)
+                    try:
+                        hwnd = self._window.native.Handle
+                    except Exception:
+                        hwnd = None
+                    scale = get_dpi_scale(hwnd)
+                    if scale != 1.0:
+                        vs = tuple(v / scale for v in vs)
+                    x, y = clamp_to_virtual_screen(int(x), int(y), win_w, win_h, vs)
+                except Exception as exc:
+                    self._log_input('move_window clamp skipped: %r' % (exc,))
+        except Exception:
+            pass
+        try:
             self._window.move(int(x), int(y))
         except Exception as exc:
             self._log_input('move_window FAILED %r' % (exc,))
