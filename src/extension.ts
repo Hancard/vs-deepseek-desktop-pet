@@ -321,8 +321,18 @@ function readDetectIntervalMs(): number | undefined {
 	try {
 		const data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8')) as
 			{ detectIntervalSec?: unknown };
-		const sec = Number(data?.detectIntervalSec);
-		if (!Number.isFinite(sec)) { return undefined; }
+		const raw = (data as { detectIntervalSec?: unknown })?.detectIntervalSec;
+		const sec = typeof raw === 'number' ? raw : Number(raw);
+		// ⚠️ 0 是 finite，`Number.isFinite` 拦不住它（0.3.42）。
+		// 而 Number(null) / Number('') / Number([]) / Number(false) 全都是 0，
+		// 于是"字段非法返回 undefined"这句契约对它们全部失效 —— 走下去
+		// Math.max(1, Math.min(60, 0)) 得到的是**下界 1 秒**，比默认值 30 秒
+		// 激进 30 倍：每 1 秒一拍，桌宠每秒被推一条、后端每秒起一个生成线程
+		// （很快撞上 MAX_PENDING_GENERATIONS），状态栏与 fs.watchFile 同步跟着抖。
+		// 而且和 Python 侧 clamp_detect_sec 的口径相反 —— 那边对 null/''/[]
+		// 回落默认 30。两边必须一致，否则用户手改设置文件后（文件头的注释
+		// 正是为这种情况准备的）看到的就是"扩展说 1 秒、桌宠说 30 秒"。
+		if (!Number.isFinite(sec) || sec <= 0) { return undefined; }
 		const clamped = Math.max(DETECT_MIN_SEC, Math.min(DETECT_MAX_SEC, Math.round(sec)));
 		return clamped * 1000;
 	} catch {
