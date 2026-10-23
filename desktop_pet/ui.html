@@ -1048,6 +1048,17 @@
         charImg.style.display = 'none';
         cssChar.classList.remove('visible');
         charBox.classList.add('live2d-active');
+        // ⚠️ 把这个 class 加上**之前**，showBubble() 很可能已经写过内联
+        // animation（0.3.42）。顺序是这样的：initLive2D() 是 async，要注入
+        // 两个 vendor 脚本、app.init、再加载 model3.json 加几十张贴图，通常
+        // 几百 ms 到数秒；而 connectSSE() 更快，后端往往立刻推一句问候语 →
+        // showBubble() → 那时 `contains('live2d-active')` 为假 → 守卫放行 →
+        // 内联 animation 写上了。上面这段注释提到的"永不恢复"正是这条路径：
+        // 内联优先级高于样式表，本行加的 class 管不住它，而守卫此后为真、
+        // 再也不会进那个分支 —— 内联就永久留下，模型自带呼吸叠加 CSS
+        // idleSway 变双重晃动，且 idleSway 带 rotate，character-box 的 rect
+        // 每帧漂移，region 采样与角色卡外接框永远锁不定。
+        charBox.style.removeProperty('animation');
         live2dStage.classList.add('visible');
 
         await model.motion('Idle', 0, vendor.MotionPriority.IDLE);
