@@ -828,12 +828,22 @@
         if (!live2d.ready && CHAR_IMG && CHAR_IMG.length > 0) {
           var base = CHAR_IMG.replace(/(\.\w+)$/, '_' + emotion + '$1');
           var testImg = new Image();
+          // ⚠️ 这两个回调是**异步**的，必须认领自己的那一次切换（0.3.42）：
+          // 两条带不同情绪的消息间隔只要小于图片加载耗时（实测 100ms 间隔
+          // 对上首次加载的 300~500ms 很容易），先发的那张慢图会**后到**，
+          // 然后无条件把 charImg.src 写成自己的情绪 —— 于是 currentEmotion
+          // 已经是 'happy'，画面上却是上一张 'greeting'，表情和文案对不上，
+          // 而且没有后续纠正（要等 8 秒定时器才刷回默认图）。
+          // onerror 同理：旧情绪图 404 的回调会把刚切好的新情绪打回默认图。
+          var myEmotion = emotion;
           testImg.onload = function() {
+            if (currentEmotion !== myEmotion) return;
             charImg.src = base;
             charImg.style.display = 'block';
             cssChar.classList.remove('visible');
           };
           testImg.onerror = function() {
+            if (currentEmotion !== myEmotion) return;
             charImg.src = CHAR_IMG;
             charImg.style.display = 'block';
             cssChar.classList.remove('visible');
