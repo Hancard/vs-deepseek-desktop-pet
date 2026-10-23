@@ -1319,6 +1319,21 @@ class _AssetServer(ThreadingHTTPServer):
     """
     daemon_threads = True
 
+    # ⚠️ 必须关掉地址复用（0.3.43）。HTTPServer 的默认值是
+    # allow_reuse_address = 1，而 Windows 上的 SO_REUSEADDR 语义与 POSIX
+    # **完全不同**：它允许第二个 socket **完整重复绑定**同一个
+    # (127.0.0.1, port) —— 实测两个 ThreadingHTTPServer 绑同一端口都成功。
+    # 于是 start_asset_server 里 `except OSError: return None, 0` 这条
+    # "端口被占用"的唯一出口**永远不可达**：用户设了 AIRI_ASSET_PORT=9300
+    # 而上一个实例没退干净（或 9300 被别的本地服务占着）时，我们照样报告
+    # 成功、page_url 指向 9300，但连接可能被路由到**另一个进程的旧页面**
+    # （里面的端口是旧的 → 气泡/设置全废），或者干脆 404 白窗，日志里
+    # 却是"asset server started"。
+    # 资产服务器平时用 port=0（内核分配）不涉及冲突，只有用户固定端口时
+    # 才需要这份保护 —— 所以这里关掉复用不会带来"重启撞 TIME_WAIT"的
+    # 副作用（SSE 服务器那边保留复用，理由见 standalone.py）。
+    allow_reuse_address = False
+
     def handle_error(self, request, client_address):
         """吞掉「客户端提前断开」这类噪声。
 
@@ -1338,15 +1353,30 @@ def start_asset_server(html_text: str, port: int = 0):
 
     port=0 表示让系统分配空闲端口；AIRI_ASSET_PORT 可固定端口，便于调试。
     """
+    try:
+        port = int(port or 0)
+    except (TypeError, ValueError):
+        port = 0
     if not port:
         try:
             port = int(os.environ.get('AIRI_ASSET_PORT', '') or 0)
         except ValueError:
             port = 0
+    # ⚠️ 端口必须夹在 0..65535（0.3.43）。以前这里只兜了 ValueError，于是
+    # `AIRI_ASSET_PORT=99999`（或 -1 / 65536）能顺利通过 int()，然后在
+    # socket.bind() 里抛 **OverflowError** —— 它**不是 OSError**，下面的
+    # except 抓不住，异常直接从 start_asset_server 穿出去。两个调用点
+    # （standalone.py / main.py）都只判返回值是否 None，于是进程带着
+    # traceback 死掉，而扩展以 stdio:'ignore' 起它 → 日志文件里最后一行
+    # 还是"character card square"，用户看到的就是"点启动桌宠完全没反应"。
+    # 同一个坑 0.3.37 在 SSE 的 resolve_port 里已经踩过一次。
+    if not (0 <= port <= 65535):
+        print(f'[airi-common] WARNING: asset port out of range: {port} -> 0')
+        port = 0
 
     try:
         srv = _AssetServer(('127.0.0.1', port), _make_handler(html_text))
-    except OSError as exc:
+    except (OSError, OverflowError, ValueError) as exc:
         print(f'[airi-common] asset server failed to bind: {exc!r}')
         return None, 0
 
