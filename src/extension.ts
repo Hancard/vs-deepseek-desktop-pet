@@ -130,7 +130,17 @@ export function activate(context: vscode.ExtensionContext) {
 	// 「编辑语料」走的是**同一个文件**：桌宠把 openCorpusSeq 加一，
 	// 这里看到序号变大就打开语料文件并回执。
 	// 先把当前序号记为"已处理"：上一次会话里点过的请求不该在重启后被重放。
-	lastCorpusOpenSeq = Number(readCorpusOpenSeq()) || 0;
+	// ⚠️ 必须过滤 Infinity（0.3.43）：设置文件里写 `"openCorpusSeq": 1e999`
+	// 是**合法 JSON**，JSON.parse 得 Infinity，而 `Infinity || 0` 仍是
+	// Infinity —— 此后 openCorpusIfRequested 的 `seq <= lastCorpusOpenSeq`
+	// 恒真，整个会话里「编辑语料」**永远不会**走 VS Code 第一级（每次都掉到
+	// code 命令 / 系统默认程序，而 code 在已打开时会再拉一个窗口，正是三级
+	// 回落想避免的观感）。下面那条守卫用的是 Number.isFinite，两边口径必须
+	// 一致；Python 侧 _as_seq 连 OverflowError 都兜了，说明这种输入形态在
+	// 本项目里本来就是认作要防的。
+	const initialCorpusSeq = Number(readCorpusOpenSeq());
+	lastCorpusOpenSeq = Number.isFinite(initialCorpusSeq) && initialCorpusSeq > 0
+		? initialCorpusSeq : 0;
 	const onPetSettingsChanged = (): void => {
 		syncPetTickFromSettings('settings file');
 		void openCorpusIfRequested();
