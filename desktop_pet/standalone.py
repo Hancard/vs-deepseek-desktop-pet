@@ -219,6 +219,46 @@ settings = load_settings()
 settings_lock = threading.Lock()
 
 
+def _persist_locked(key, value):
+    """在**已持 settings_lock** 的前提下改一个键并落盘（0.3.43）。
+
+    这里一次解决两个"内存 / 磁盘分叉"：
+
+    ① **落盘失败要回滚内存**。这两个键都有两个消费者：桌宠自己读内存
+       （GET /settings → settings_payload()），扩展读磁盘（readDetectIntervalMs
+       / openCorpusSeq）。只改内存不回滚的话，目录只读 / OneDrive 占位 /
+       被杀软拦下 os.replace 时，两边按不同值跑。
+       openCorpusSeq 的后果尤其隐蔽：内存是 N+1、磁盘是 N，之后**任何一次
+       成功的保存**（比如用户顺手改检测周期）都会把 N+1 一起写下去，扩展
+       下一次 watch 到就判定"有新请求" —— 用户没点任何菜单，VS Code 却自己
+       打开了语料文件。0.3.42 只给 detectIntervalSec 补了回滚，这个键漏了。
+
+    ② **写盘前先读磁盘合并**。`settings` 是启动时 load 的一份快照，用户手改
+       设置文件（扩展侧注释明确支持这种用法）之后，下一次保存会把整份快照
+       写回去，静默覆盖掉他改的值 —— 用户看到的就是"我改的文件它不认，
+       还给我改回去了"。
+
+    @returns 是否落盘成功
+    """
+    prev = settings.get(key)
+    disk = load_settings()          # 磁盘可能是权威（用户手改过）
+    disk[key] = value
+    settings[key] = value
+    if save_settings(disk):
+        # 内存与磁盘对齐（其它键也以磁盘为准）。
+        # ⚠️ 逐键赋值，**不要** clear() + update()：settings_payload() 在
+        #    锁外读（多线程服务器里 GET /settings 随时可能来），clear 与
+        #    update 之间有一个空字典窗口，那一瞬间会 KeyError。
+        for k, v in disk.items():
+            settings[k] = v
+        return True
+    if prev is None:
+        settings.pop(key, None)
+    else:
+        settings[key] = prev
+    return False
+
+
 def settings_payload():
     """给前端和扩展的统一视图：当前值 + 合法范围。
 
@@ -1239,10 +1279,12 @@ class AiriHandler(BaseHTTPRequestHandler):
                 slot = {'event': threading.Event(), 'ok': False, 'method': None}
                 with settings_lock:
                     seq = _as_seq(settings.get('openCorpusSeq')) + 1
-                    settings['openCorpusSeq'] = seq
                     with _corpus_open_lock:
                         _corpus_open_wait[seq] = slot
-                    saved = save_settings(settings)
+                    # 落盘失败同样要回滚（0.3.43），理由见 _persist_locked：
+                    # 不回滚的话内存比磁盘大 1，之后任何一次成功保存都会把
+                    # 这个"没落过盘的新序号"写下去，扩展读到就自己打开语料。
+                    saved = _persist_locked('openCorpusSeq', seq)
                 log('[airi-corpus] open requested (seq=%d, saved=%s)' % (seq, saved))
                 threading.Thread(target=_open_corpus_worker, args=(seq, slot),
                                  daemon=True).start()
@@ -1261,18 +1303,11 @@ class AiriHandler(BaseHTTPRequestHandler):
             with settings_lock:
                 prev = settings['detectIntervalSec']
                 cur = clamp_detect_sec(msg.get('detectIntervalSec'))
-                settings['detectIntervalSec'] = cur
-                saved = save_settings(settings)
-                # ⚠️ 落盘失败必须把内存值还原（0.3.42）。
-                # 这个键有**两个**消费者：桌宠自己读内存（GET /settings →
-                # settings_payload()），扩展读磁盘（readDetectIntervalMs）。
-                # 以前只改内存、不回滚：目录只读 / OneDrive 占位 / 被杀软拦下
-                # os.replace 时，桌宠按新周期跑、扩展按旧周期推 —— 两边分叉。
-                # 而且界面会更迷惑：前端看到 saved:false 会回滚显示，可下次
-                # 右键菜单 syncDetectSec() 又 GET 到内存里的新值，界面自己
-                # "跳回去"（ui.html 那条注释描述的观感，成因不同但一样怪）。
+                # ⚠️ 落盘失败必须把内存值还原（0.3.42），并且写盘前要与磁盘
+                # 合并 —— 两件事都在 _persist_locked 里，这里不再自己
+                # save_settings(整份快照)。
+                saved = _persist_locked('detectIntervalSec', cur)
                 if not saved:
-                    settings['detectIntervalSec'] = prev
                     log('[airi-settings] save failed -> reverted to %ds' % prev)
             if cur != prev or not saved:
                 # 改周期是"会影响观感"的操作，日志里留一条，省得排查
