@@ -1416,12 +1416,15 @@ def main(port=None):
         import webview
     except ImportError:
         log('[airi-standalone] ERROR: pywebview not installed. Run: pip install pywebview')
-        log(f'[airi-standalone] HTTP server still running on port {PORT}')
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            pass
+        # ⚠️ 绝不能在这里"保持进程活着"（0.3.42）。
+        # 以前是 `while True: time.sleep(1)`，于是 sys.exit(1) 永远不可达。
+        # 而这个分支到达时 HTTP 服务**已经在监听**（前面 ready.set() 过），
+        # /ping 照常 200 —— 扩展的 checkStandaloneAlive 只问 /ping，立刻判定
+        # "桌宠已启动"并弹出成功提示、开始周期推送。用户侧的实际观感是：
+        # 提示说启动了、但一个窗口都没有；再点状态栏还被"已经在运行了"挡回；
+        # 那个僵尸进程也永不退出（stdio:'ignore'，唯一线索只有本日志文件）。
+        # 直接退出反而正确：进程一走 /ping 就不可达，扩展 8 秒守卫命中
+        # "服务器未响应"告警，用户至少知道启动失败了。
         sys.exit(1)
     # WebView2 的后台节流会把"不可见/被遮挡"页面的定时器压到极低频甚至冻结。
     # 桌宠是全透明异形窗口，最容易被 Chromium 的可见性启发式误判成后台页 ——
