@@ -1306,6 +1306,9 @@
     var dragging = false, dragStartX = 0, dragStartY = 0, winStartX = 0, winStartY = 0;
     var downX = 0, downY = 0, moved = false;
     var dragPointerId = null;   // 已捕获的指针 id（捕获失败则为 null）
+    // 每次按下的自增序号（0.3.42）：get_position() 是**跨桥异步**的，
+    // 它的回填必须认领自己那一次按下，否则见 pointerdown 里的注释。
+    var dragSeq = 0;
     var CLICK_SLOP = 5;   // 移动不超过这个像素数才算"点击"
 
     function endDrag(e) {
@@ -1341,12 +1344,21 @@
       }
       if (window.pywebview && window.pywebview.api) {
         try {
+          var mySeq = ++dragSeq;
           var p = window.pywebview.api.get_position();
           // ⚠️ 不要用 `pos[0] || winStartX`：坐标**真的可以是 0**（拖拽钳制
           // 允许窗口贴到屏幕左/上边缘），而 0 是假值 —— 会被当成"没取到"
           // 丢掉，回退到 window.screenX，于是这一拖的起点错了、窗口跳一下。
           // 判断必须是"是不是数字"，不是"是不是真值"（0.3.38）。
           var applyPos = function(pos) {
+            // ⚠️ 认领自己的那一次按下（0.3.42）：跨桥调用是异步的，而
+            // move_window 本身也让窗口位置滞后于逻辑值。松手后很快再次按下
+            // 时，上一次那个还在飞行的 promise 会在这时 resolve，把**上一次
+            // 拖拽的起点**写进 winStartX/Y，盖掉刚算好的起点 —— 随后
+            // pointermove 按这个错基准调 move_window，窗口当场跳一下（位移量
+            // 约等于上一次拖拽的位移）。判断 dragging 也不够：快速连按两次
+            // 时它又已经是 true 了，所以只能用序号。
+            if (mySeq !== dragSeq) return;
             if (!pos) return;
             if (typeof pos[0] === 'number' && isFinite(pos[0])) winStartX = pos[0];
             if (typeof pos[1] === 'number' && isFinite(pos[1])) winStartY = pos[1];
