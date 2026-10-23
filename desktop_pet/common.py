@@ -21,6 +21,7 @@ common.py — Airi 桌宠共用工具
 静态资源由本模块的服务器提供（跟 SSE 服务器分开，SSE 那边完全不用动）。
 """
 
+import base64
 import ctypes
 import os
 import sys
@@ -991,9 +992,65 @@ def find_character_image():
     return str(p) if p.is_file() else None
 
 
+# 立绘路由前缀与它映射的目录（见 _character_url 与 _make_handler 里的路由）
+_CHAR_PREFIX = '/char/'
+_CHAR_ROOT = _SCRIPT_DIR / 'assets'
+
+_CHAR_MIME = {
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+}
+
+
+def _character_url(p: Path) -> str:
+    r"""把立绘路径转成**页面真的能取到**的 URL（0.3.43）。
+
+    ⚠️ 以前这里返回 `p.as_uri()`，也就是 `file:///S:/.../character.png`。
+    但页面本体是由本地静态服务器以 `http://127.0.0.1:<port>/` 提供的
+    （本模块开头那段注释说得很清楚：v0.3 起就是同源 HTTP）。Chromium /
+    WebView2 明确**禁止 http 文档加载 file: 子资源**（控制台一行
+    "Not allowed to load local resource"），于是：
+
+      - `AIRI_CHARACTER_IMAGE` 以及 `assets/character.png` 这两条对外承诺
+        的功能，在换成 http 静态服务器之后**100% 失效**；
+      - 情绪立绘（`character_happy.png` 这类，前端按文件名 replace 拼出来）
+        同样取不到；
+      - 全程**零日志**：文件存在，所以 find_character_image / load_html
+        两条 WARNING 都不会打；前端只有一条静默 onerror 退回 CSS 角色。
+        用户看到的就是"我的立绘怎么变成默认小人了"。
+
+    现在的两条路，都不产生 file: 请求：
+      ① 立绘在 `assets/` 根目录下（默认情况）→ `/char/<name>`，与页面同源。
+         必须保留这条：情绪立绘是"同目录、文件名加后缀"，只有真 URL 才能
+         让前端那个 `.replace(/(\.\w+)$/, ...)` 拼出可用的兄弟 URL。
+      ② 其它任意路径（用户把立绘放到别处）→ 内联 data URI。立绘本身可用，
+         情绪变体退化成原图（replace 不匹配 data: 串），但不会坏。
+    """
+    try:
+        rel = p.resolve().relative_to(_CHAR_ROOT.resolve())
+    except (ValueError, OSError):
+        rel = None
+    if rel is not None and len(rel.parts) == 1:
+        return _CHAR_PREFIX + urllib.parse.quote(rel.name)
+    mime = _CHAR_MIME.get(p.suffix.lower())
+    if mime is None:
+        # 页面拿不到这个格式（也不是浏览器能显示的），宁可退回 CSS 角色
+        print(f'[airi-common] WARNING: unsupported character image type: {p.name}')
+        return ''
+    try:
+        return 'data:%s;base64,%s' % (
+            mime, base64.b64encode(p.read_bytes()).decode('ascii'))
+    except OSError as exc:
+        print(f'[airi-common] WARNING: cannot inline character image {p}: {exc!r}')
+        return ''
+
+
 def load_html(port, char_img=None, live2d=False, silhouette=False, card='square',
               detect_sec=30):
-    """读取 ui.html，注入端口、立绘 file:// URI 和各个开关，返回最终 HTML 字符串。
+    """读取 ui.html，注入端口、立绘 URL 和各个开关，返回最终 HTML 字符串。
 
     live2d 为 True 时才让页面去加载引擎；素材缺失时保持 False，
     页面就还走原来的图片 / CSS 角色，不会在控制台刷一堆 404。
@@ -1035,10 +1092,11 @@ def load_html(port, char_img=None, live2d=False, silhouette=False, card='square'
             # as_uri() 只吃绝对路径（相对路径直接 ValueError）→ 先补成绝对
             p = p if p.is_absolute() else p.resolve()
             # ⚠️ resolve() 对**不存在**的路径也是成功的（非严格模式），于是
-            # as_uri() 会顺利产出一个指向空处的 file:// —— 页面拿到它只会
-            # 显示一个裂图，比"退回 CSS 角色"更难看。存在性必须自己查。
-            img_uri = p.as_uri() if p.is_file() else ''
-            if not img_uri:
+            # 会顺利产出一个指向空处的 URL —— 页面拿到它只会显示一个裂图，
+            # 比"退回 CSS 角色"更难看。存在性必须自己查。
+            if p.is_file():
+                img_uri = _character_url(p)
+            else:
                 print(f'[airi-common] WARNING: character image not a file:'
                       f' {char_img!r}')
         except (OSError, ValueError) as exc:
@@ -1131,6 +1189,24 @@ def _make_handler(html_text: str):
 
             if path == '/favicon.ico':
                 return self._plain(204, b'', body)
+
+            # 立绘（0.3.43）。只允许 assets/ 根目录下的**单层文件名** ——
+            # 情绪立绘也是同目录同层（character_happy.png）。带子路径的
+            # 一律 403：不把整个 assets/ 递归暴露出去（live2d 模型另有
+            # /pet-assets/ 这条专用路由）。
+            # ⚠️ 必须先 unquote 再判斜杠：`/char/live2d%2Fmodel.png` 里的
+            #    %2F 解码后就是真斜杠，光看原始串会被绕过。
+            if path.startswith(_CHAR_PREFIX):
+                rel = urllib.parse.unquote(path[len(_CHAR_PREFIX):])
+                if (not rel or '/' in rel or '\\' in rel or rel in ('.', '..')):
+                    return self._plain(403, b'forbidden path', body)
+                target = _safe_join(_CHAR_ROOT, rel)
+                if target is None:
+                    return self._plain(403, b'forbidden path', body)
+                if not target.is_file():
+                    return self._plain(
+                        404, b'not found: ' + path.encode('utf-8'), body)
+                return self._file(target, body)
 
             # 引擎 js 与 core（/vendor/）、Live2D 模型闭包（/pet-assets/）
             for prefix, base in (('/vendor/', VENDOR_DIR),
