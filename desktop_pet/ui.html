@@ -863,9 +863,19 @@
         charImg.style.display = 'none';
         cssChar.classList.add('visible');
       };
+      // ⚠️ CSS 角色要等图片**真的画出来**才撤（0.3.42）。
+      // 以前这里在设 src 之前就 remove('visible')，而图片从设 src 到 decode
+      // 完成之间（首帧几十~几百 ms；URL 挂起时一直持续到 onerror）
+      // getBoundingClientRect() 是 0×0 —— alphaAt() 的 `fr.width < 1` 判定
+      // 于是恒成真，handlePetClick 里 `alphaAt(...) < 24` 恒成立，
+      // pet_click 一次都不调：**点角色完全没反应**，且前端零报错、日志零痕迹
+      // （就是 alphaAt 注释里记的那个故障，只是触发条件换成"立绘还在加载"）。
+      // 保留 cssChar 到 onload 之后，这段时间命中判定还能落到它身上。
+      charImg.onload = function() {
+        cssChar.classList.remove('visible');
+      };
       charImg.src = CHAR_IMG;
       charImg.style.display = 'block';
-      cssChar.classList.remove('visible');
     }
 
     // ============ Live2D 角色 ============
@@ -1355,7 +1365,12 @@
     // 非 Live2D 时"角色"到底是哪个元素（图片立绘 / CSS Q 版人）。
     // 命中判定必须有这条兜底，理由见 alphaAt。
     function fallbackCharacterEl() {
-      if (charImg && charImg.style.display !== 'none' && charImg.src) {
+      // ⚠️ `charImg.src` 有值不等于"图上得出来"（0.3.42）：decode 完成前
+      // 它的外接框是 0×0，交给 alphaAt 会被 `fr.width < 1` 判掉 —— 那时
+      // cssChar 还在（见 showImageCharacter），命中判定必须落到它身上。
+      // 判据只能是 complete + naturalWidth，不能只看 src 是不是真值。
+      if (charImg && charImg.style.display !== 'none' && charImg.src &&
+          charImg.complete && charImg.naturalWidth > 0) {
         return charImg;
       }
       if (cssChar && cssChar.classList.contains('visible')) return cssChar;
