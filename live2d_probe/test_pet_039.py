@@ -325,7 +325,13 @@ function setEmotion(e) {}
 function rect(l, t, w, h) {
   return { left: l, top: t, right: l + w, bottom: t + h, width: w, height: h };
 }
+// ⚠️ complete / naturalWidth 必须给（0.3.42）：fallbackCharacterEl 的判据是
+//    "图**真的画出来了吗**"，不是"src 有值吗" —— 图的 decode 未完成之前
+//    它的外接框是 0×0，命中判定要落到 CSS 角色身上。缺这两个字段的话
+//    fallbackCharacterEl 返回 null，F1 会假 FAIL（看着像"点角色没反应"
+//    回归了，其实是这个 mock 自己没跟上产品代码的语义）。
 var charImg = { style: { display: 'block' }, src: 'file:///x.png',
+                complete: true, naturalWidth: 300,
                 getBoundingClientRect: function() { return rect(0,0,300,480); } };
 var cssChar = { classList: { contains: function() { return false; } } };
 var charBox = { classList: { contains: function() { return false; } }, style: {} };
