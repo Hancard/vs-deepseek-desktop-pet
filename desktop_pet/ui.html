@@ -1986,6 +1986,9 @@
 
     // ============ 右键菜单 ============
     var menuAnchorX = 0, menuAnchorY = 0;
+    // 「编辑语料」的在途标志（0.3.43）：菜单的 180ms visibility 过渡期内
+    // 元素仍可点击，双击会发两次请求（见 click handler 里的注释）。
+    var corpusOpenBusy = false;
 
     /** 把菜单收敛进窗口（留 4px 呼吸）。
      *  溢出窗口的部分会被 OS 裁掉 —— region 只能包含窗口内的像素，溢出那块
@@ -2192,6 +2195,15 @@
 
       // 其余（含 exit）都是"点完就收起"
       if (a === 'edit-corpus') {
+        // ⚠️ 在途去重（0.3.43）：hideMenu() 只移除 .show，而菜单的
+        // `transition: visibility 0.18s` 在过渡期间按规范**仍保持 visible**，
+        // 参与命中测试的也不是 opacity —— 这 180ms 内元素照样能点，双击的
+        // down-up-down-up 完全够。于是同一个请求发两次：后端每次请求都新起
+        // 一个 worker，扩展只回执最大的 seq，先发那个 slot 永远等不到回执
+        // → 2.5s 后走 code / os.startfile 回落 → 同一个语料文件被两个程序
+        // 各打开一次（两边都能写，谁后保存谁覆盖），还多冒一条气泡。
+        if (corpusOpenBusy) { hideMenu(); return; }
+        corpusOpenBusy = true;
         // 只发请求，不在这里冒泡说话 —— 真正打开成功/失败由 Python 那边
         // 决定（它要等扩展回执、还可能回落），由它推**唯一一条**结果气泡。
         // 这里先说一句就是两条气泡同时冒（MAX_BUBBLES=2）。
@@ -2201,15 +2213,17 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ openCorpus: true })
           }).then(function(r) { return r.json(); }).then(function(d) {
+            corpusOpenBusy = false;
             // 请求**到达** Python 时由它推结果气泡（它要等扩展回执、还可能
             // 三层回落）；但请求压根没到达（服务不可达 / 被 CORS 护栏挡掉）
             // 时 Python 那边什么都不会发生 —— 菜单收起、然后一片死寂，
             // 用户只能反复点，前后端日志里都零痕迹。这条气泡就是补这个洞。
             if (d && d.ok === false) { showBubble('没能打开语料文件…', true); }
           }).catch(function() {
+            corpusOpenBusy = false;
             try { showBubble('没能打开语料文件…', true); } catch (e) {}
           });
-        } catch (err) {}
+        } catch (err) { corpusOpenBusy = false; }
       }
       if (a === 'exit') {
         try { if (window.pywebview && window.pywebview.api) window.pywebview.api.exit_app(); } catch (err) {}
