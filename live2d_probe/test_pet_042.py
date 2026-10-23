@@ -478,9 +478,15 @@ section('C2 面板 items 也要裁剪')
 try:
     hd = grab(ESRC, 'function handleDiagnosticsChanged(): void {', '\n}\n')
     check('C2-0 抠到 handleDiagnosticsChanged', bool(hd))
-    # 注释里写的是"连同 webview 一起用裁剪后的文本"，实现必须真的裁
-    check('C2-1 发给面板的 items 走了 clipMessage（关键）',
-          'clipMessage' in hd, 'block=%r' % hd[-260:])
+    # 注释里写的是"连同 webview 一起用裁剪后的文本"，实现必须真的裁。
+    # ⚠️ 0.3.43 把这条消息的构造抽成了 buildDiagnosticsMessage()（面板
+    #    首帧也要复用它），所以"裁剪"这件事现在可能不在 handleDiagnosticsChanged
+    #    的函数体里 —— 判据改成"走的是那条统一构造"，再看构造里有没有裁。
+    builder = grab(ESRC, 'function buildDiagnosticsMessage(', '\n}\n')
+    wired = ('buildDiagnosticsMessage' in hd or 'clipMessage' in hd)
+    check('C2-1 发给面板的 items 走了裁剪（直接或经统一构造）',
+          wired and ('clipMessage' in hd or 'clipMessage' in builder),
+          'block=%r builder=%r' % (hd[-160:], builder[-160:]))
 except Exception as exc:
     check('C2 段整体未崩', False, '%s: %s' % (type(exc).__name__, exc))
 

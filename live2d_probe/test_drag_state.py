@@ -56,7 +56,13 @@ def check(name, ok, detail=''):
 UI = io.open(UI_HTML, encoding='utf-8').read()
 
 START = 'var dragging = false, dragStartX = 0'
-END = "window.addEventListener('blur', function() { if (dragging) { endDrag(null); } });"
+# ⚠️ 锚点要跟着产品代码走（0.3.43）：blur 回调不再是单行，它多了一句
+# "失焦也要收菜单"（菜单是 on_top 的，不收的话切走再回来点角色会误触
+# 「退出」）。这里取到 blur 回调的收尾 `});` 为止，抽出的块仍是完整的
+# 状态机 + 三道兜底。改产品代码时**必须**同步这个锚点，否则 block 为空、
+# 整个 A 段 13 条一起假失败（看起来像拖拽彻底坏了）。
+END = ("      if (contextMenu.classList.contains('show')) hideMenu();\n"
+       "    });")
 
 i0 = UI.find(START)
 i1 = UI.find(END)
@@ -90,6 +96,9 @@ var window = {
   }}
 };
 function handlePetClick(e) { CLICKS++; }
+// 0.3.43：blur 回调里还会调 hideMenu（失焦收右键菜单），补最小 stub
+var contextMenu = { classList: { contains: function() { return false; } } };
+function hideMenu() {}
 
 '''
 

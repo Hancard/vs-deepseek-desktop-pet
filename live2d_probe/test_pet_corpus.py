@@ -597,7 +597,9 @@ _src = io.open(os.path.join(PET, 'standalone.py'), encoding='utf-8').read()
 _blk_i = _src.find("if msg.get('openCorpus'):")
 _blk = _src[_blk_i:_blk_i + 3000]
 _reg = _blk.find('_corpus_open_wait[seq] = slot')
-_sav = _blk.find('saved = save_settings')
+# 0.3.43 起落盘统一走 _persist_locked（它内部才 save_settings）：
+# 这个键也要"落盘失败回滚 + 写前合并磁盘"，见 standalone._persist_locked。
+_sav = _blk.find('saved = _persist_locked(')
 check('源码里"登记等待槽"排在"落盘"之前（顺序不变量）',
       _blk_i >= 0 and 0 <= _reg < _sav, (_blk_i, _reg, _sav))
 check('code 回落用 list2cmdline 拼串（exe 自带引号）',

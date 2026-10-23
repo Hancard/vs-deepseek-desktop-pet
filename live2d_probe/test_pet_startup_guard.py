@@ -140,10 +140,26 @@ check('B4 畸形立绘路径（内嵌 NUL）不抛异常', raised2 is None, rais
 check('B5 畸形路径时页面照常产出', ok2)
 
 # 正常路径仍然照旧工作
+# ⚠️ 0.3.43 起立绘不再是 file://（那正是 bug 本身）：页面本体由
+#    http://127.0.0.1:<port>/ 提供，Chromium/WebView2 禁止 http 文档加载
+#    file: 子资源 —— 以前注入 as_uri() 的结果就是"立绘 100% 加载不出来，
+#    静默退回 CSS 角色"。现在：
+#      · 在 assets/ 根目录下 → 同源 /char/<name>（情绪立绘也能拼出来）
+#      · 在别处（比如这里的临时目录）→ 内联 data: URI
 _abs = os.path.join(_img_dir, 'character.png')
 h3 = common.load_html(19876, _abs, live2d=False)
-check('B6 正常绝对路径立绘仍然注入 file:// URI',
-      bool(h3) and 'file:///' in h3 and 'character.png' in h3)
+check('B6 立绘不在 assets/ 下时内联成 data: URI（绝不能是 file://）',
+      bool(h3) and 'data:image/png;base64,' in h3 and 'file:///' not in h3,
+      'has_data=%s has_file=%s' % ('data:image/png' in (h3 or ''),
+                                   'file:///' in (h3 or '')))
+_real_img = common._SCRIPT_DIR / 'assets' / 'character.png'
+if _real_img.is_file():
+    h4 = common.load_html(19876, str(_real_img), live2d=False)
+    check('B6b assets/ 下的立绘走同源 /char/ 路由（情绪立绘才拼得出来）',
+          bool(h4) and '/char/character.png' in h4,
+          'has_char=%s' % ('/char/character.png' in (h4 or '')))
+else:
+    out('  [SKIP] B6b 仓库里没有 assets/character.png')
 
 # 静态契约
 check('B7 load_html 读 ui.html 失败时返回 None 而不是抛',
@@ -210,7 +226,12 @@ out('')
 out('=== D. region 合并：CombineRgn 返回值不能丢 + rad 要钳制 ===')
 
 check('D1 _merge 返回的是布尔（成功/失败），不再是裸返回值',
-      'return rc2 != 0' in SRC)
+      # 0.3.43 从 `rc2 != 0` 收紧到 `rc2 >= 2`：CombineRgn 的 NULLREGION(1)
+      # 表示合并结果是空区域，算成功会绕过 kept 防线、把空 region 装到窗口上
+      # （窗口不可见 + 点不到 + 退不出去）。两代写法都要认。
+      any(s in SRC for s in ('return rc2 >= 2', 'return rc2 != 0')))
+check('D1b NULLREGION 不算成功（空 region 不许装到窗口上）',
+      'return rc2 >= 2' in SRC)
 check('D2 调用点只在合并成功时才 kept += 1',
       'if _merge(h_piece):' in SRC)
 check('D3 kept 计数跟着 _merge 的结果走（不再无条件 +1）',
