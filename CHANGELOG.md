@@ -1,5 +1,126 @@
 # Change Log
 
+## [0.3.43] — 2026-10-24
+
+### Fixed
+
+- **立绘永远加载不出来（`AIRI_CHARACTER_IMAGE` / `assets/character.png` 全线失效）**（`common.py`）
+  `load_html()` 注入的是 `Path.as_uri()`，也就是 `file:///S:/.../character.png`；而页面本体
+  是由本地静态服务器以 `http://127.0.0.1:<port>/` 提供的（v0.3 起就是同源 HTTP，文件头
+  注释写得很清楚）。Chromium / WebView2 **禁止 http 文档加载 file: 子资源**，于是：
+  ① 自定义立绘和 `assets/character.png` 两条对外承诺的功能 100% 失效；② 情绪立绘
+  （`character_happy.png` 这类按文件名拼出来的）同样取不到；③ **全程零日志** —— 文件确实
+  存在，所以 `find_character_image` 和 `load_html` 两条 WARNING 都不会打，前端只有一条
+  静默 `onerror` 退回 CSS 小人。用户看到的就是"我的立绘怎么变成默认小人了"。
+  修：新增 `_character_url()` 与 `/char/<name>` 路由 —— 在 `assets/` 根目录下的立绘走
+  同源 URL（情绪变体因此仍然可用），其它任意路径内联成 `data:` URI。路由只放行单层
+  文件名（先 unquote 再判斜杠，`%2F` 绕不过去）。
+- **`AIRI_ASSET_PORT` 越界直接崩，日志里一行都没有**（`common.py`）
+  `int('99999')` 成功、`if not port` 也放行，然后 `socket.bind()` 抛 **`OverflowError`**
+  —— 它**不是 OSError**，`start_asset_server` 的 `except OSError` 抓不住，异常穿到顶层；
+  扩展以 `stdio:'ignore'` 起进程 → traceback 被丢掉，`.airi-pet.log` 最后一行还是
+  "character card square"。用户点「启动桌宠」完全没有反应。修：端口夹到 0..65535
+  （越界回落 0），`except` 放宽到 `(OSError, OverflowError, ValueError)`。
+- **资产服务器的"端口被占用"分支永远不可达**（`common.py`）
+  `HTTPServer.allow_reuse_address` 默认 1，而 Windows 的 `SO_REUSEADDR` 允许**完整重复
+  绑定**（实测两个 server 绑同一端口都成功）。于是用户设了固定端口而上一个实例没退干净
+  （或端口被别的服务占着）时，我们照样报告成功、`page_url` 指向那个端口 —— 新窗口可能
+  加载到**另一个进程的旧页面**（里面的端口是旧的 → 气泡/设置全废），或者 404 白窗，
+  日志却是"asset server started"。修：`_AssetServer.allow_reuse_address = False`
+  （资产服务器平时用 `port=0` 由内核分配，不存在"重启撞 TIME_WAIT"的副作用；
+  SSE 服务器保留复用，那条路要的就是"退出后能立刻重启"）。
+- **`AIRI_WIN_BG=off` 时 standalone 白等 10 秒并打假告警**（`standalone.py`）
+  `fix_window_background()` 在该模式下**必然**返回 `(False, ...)`，而调用方是
+  `while 到 10 秒 deadline、只认 ok` 的循环。0.3.41 只在 `main.py` 补了 off 短路，
+  **主入口 standalone 漏了** —— 启动多花 10 秒（前面还有最长 20 秒的 Mica 循环），
+  最后再打一条"气泡/名牌周围可能还会有一圈浅色方块"的假 WARNING，排障时把人往
+  DWM/Form 方向带。修：照抄那段短路。
+- **`get_position()` 用 `[0, 0]` 当错误码 → 拖拽跳到左上角**（`common.py`）
+  `[0,0]` 是一个**看起来完全合法**的坐标：前端 `applyPos` 只挡 `!pos` 和"是不是数字"，
+  两个条件都通过，于是 `winStartX/Y` 被写成 0/0，下一次 `pointermove` 用「鼠标位置 − 0」
+  算位移，窗口直接蹦到屏幕左上角。前端早就写好了 `if (!pos) return;`，是后端的错误码
+  把它堵死了 —— 0.3.38 只修了"0 被当假值丢掉"那一半。修：失败返回 `None`，
+  真实的 `(0,0)` 仍原样返回。
+- **`CombineRgn` 的 `NULLREGION` 被当成成功 → 空 region 装到窗口上**（`common.py`）
+  `_merge` 用 `rc2 != 0` 判成功，而 `NULLREGION(1)` 表示合并结果是**空区域**。气泡贴到
+  窗口底边时尾巴三角形三个点被 `_clip_y` 钳成共线，`CreatePolygonRgn` 返回一个合法但
+  **空**的句柄（不是 0，`if not h_piece` 拦不住），`CombineRgn` 返回 NULLREGION，`kept`
+  却 > 0 → `SetWindowRgn` 把空区域装上窗口：**窗口整个不可见、鼠标点不到（连右键菜单
+  都打不开 → 退不出去，只能杀进程）**。0.3.38 只堵了 `ERROR(0)` 这半边。
+  修：只认 `SIMPLEREGION(2)` / `COMPLEXREGION(3)`。
+- **`exit_app()` 失败完全静默，且可能根本退不出去**（`common.py`）
+  唯一的逃生口是裸 `except Exception: pass`：`destroy()` 抛异常时函数静默返回，窗口还在、
+  进程还在，日志里一行都没有 —— 同文件其它五个桥方法失败都会留痕，只有这条不留。
+  修：失败记一行日志，并兜底 `os._exit(0)`（用户按的是"退出"，那就必须退出）。
+- **一条孤立代理字符能让桌宠永久失声**（`standalone.py`）
+  Python 的 str 可以合法地含孤立代理（`'\ud800'`），只是不能编码成 utf-8。
+  来源之一是**本扩展自己**：`clipMessage()` 按 UTF-16 码元 `slice`，第 59 个码元正好是
+  某个 emoji 的前半时就切出孤立代理；来源之二是任何本机客户端 `POST /push`。
+  `json.dumps(ensure_ascii=False)` 把它原样留在帧里，写帧时 `.encode('utf-8')` 抛
+  `UnicodeEncodeError`，被 `except Exception: pass` 吞掉、连接关闭、日志零行。更糟的是
+  坏消息**留在队列里且排在所有后续消息前面**：前端自动重连→带 Last-Event-ID→从这条开始
+  重播→再炸，3 秒一轮无限循环。结果：桌宠再也不出任何气泡，只有重启进程才能恢复。
+  修：`_sse_safe()` 入队前做可编码化（replace 只影响孤立代理，正常文本一字不动）；
+  写帧失败按类型留痕（断连不吵，编码错误必记）。
+- **`/push` 解析失败分支把最大 1MB 的原文塞进队列**（`standalone.py`）
+  非对象分支早就截到 500，解析失败分支却是 `push_message('chatMessage', body)` ——
+  body 上限 `MAX_BODY_BYTES=1MB`，队列 200 条 → 最坏 ~200MB 常驻，且每个 SSE 连接
+  每次都要写 1MB。修：两条分支统一 500。
+- **设置落盘：`openCorpusSeq` 不回滚，手改的设置被覆盖**（`standalone.py`）
+  抽 `_persist_locked()` 统一处理两件事：① 落盘失败**回滚内存**（`openCorpusSeq` 以前
+  没回滚：内存 N+1、磁盘 N，之后任何一次成功保存都会把 N+1 写下去，扩展下一次 watch 到
+  就判定"有新请求"—— 用户没点任何菜单，VS Code 自己打开了语料文件）；② 写盘前**先读磁盘
+  合并**（`settings` 是启动时的快照，用户手改设置文件后，下一次保存会把整份快照写回去，
+  静默覆盖 —— 用户看到"我改的文件它不认，还给我改回去了"）。
+- **`log()` 只兜 `OSError`，写日志本身会抛**（`standalone.py`）
+  `UnicodeEncodeError` 是 `ValueError` 的子类、**不是** OSError。消息里混进孤立代理时
+  `open(...).write()` 抛异常，而这个调用点不在任何 try 里 —— worker 线程被打死：
+  "台词库给你在 VS Code 里打开了…" 那句气泡永远发不出去，文件却真的打开了。
+  修：同时兜 `ValueError`，且**不能只 pass**（日志是唯一通道），退化成 replace 后的
+  形式再写一次。
+- **`openCorpusSeq` 读到 `Infinity` 让「编辑语料」永久失效**（`extension.ts`）
+  设置文件里写 `"openCorpusSeq": 1e999` 是合法 JSON，`JSON.parse` 得 `Infinity`，
+  而 `Infinity || 0` 仍是 Infinity → 此后 `seq <= lastCorpusOpenSeq` 恒真，整个会话里
+  永远走不到 VS Code 第一级（每次掉到 `code` 命令 / 系统默认程序）。
+  修：`Number.isFinite` + `> 0` 过滤，与 `openCorpusIfRequested` 那条守卫同口径。
+- **诊断面板打开后恒显示"没有错误 — 一切正常"**（`extension.ts`）
+  创建面板后不推快照，而 HTML 里 `#list` 的初始内容写死的就是那句话。工作区明明挂着
+  十几个错误、只是没人在打字（`onDidChangeDiagnostics` 不再触发）时，用户打开面板看到
+  的是**一条假结论**，会以为已经修好。修：HTML 末尾发 `ready` 握手，扩展收到后推一次
+  `pushDiagnosticsSnapshot()`（直接 postMessage 可能早于页面加载完成而被丢弃）。
+- **连续第 3 条消息会把第 2 条气泡瞬间抹掉**（`ui.html`）
+  `removeBubble()` 只加 `fade-out`（只改 opacity/transform，**不脱离文档流**），450ms 内
+  它仍占着高度；而 `fitBubbles()` 量的是**整个容器**的 rect，却用
+  `querySelectorAll(':not([data-removing])')` 挑受害者 —— 于是"删一条"删掉的是**刚出现
+  的第二条**（可能只说了半句），真正该走的还在慢慢淡出。三条两行以上的连续消息就能复现
+  （3×2 行 + 2×gap ≈ 206px > 可用高度 ≈ 200px），`MAX_BUBBLES=2` 等于退化成只留一条。
+  修：溢出时先把"正在淡出"的那条立刻 `remove()`，再考虑删活的。
+- **右键菜单不随失焦关闭 → 切回来点角色会误触「退出」**（`ui.html`）
+  窗口是 `on_top=True`，菜单一直浮在最上层，而唯一的关闭路径是 **document 上的 click**
+  —— 用户切到别的程序时那个 click 落在别的进程里，菜单就一直开着。回来后习惯性地点一下
+  角色（正好在刚才右键的位置，「退出 deepseek」就压在光标下方 5~33px）→ 桌宠直接退出，
+  用户完全没有因果线索。修：`window blur` 里一并 `hideMenu()`。
+- **检测周期保存失败后回滚到"从未落盘过的中间值"**（`ui.html`）
+  `prev` 是每次点击各自捕获的，`clearTimeout` 把前几次的闭包连同 `prev` 一起丢掉，
+  只有最后一个活到 POST。连点 5 下（30→35）后失败 → 回滚到 34，而磁盘上真正生效的是
+  30：错误气泡说"没保存成功"，界面显示的值却既不是新值也不是旧值。
+  修：只在 burst **起点**记一次（`burstPrev`）。
+- **「编辑语料」没有在途守卫，180ms 内双击会发两次**（`ui.html`）
+  `hideMenu()` 只移除 `.show`，而 `transition: visibility 0.18s` 期间元素按规范仍
+  **保持 visible**（参与命中测试的本来也不是 opacity）—— 双击的 down-up-down-up 完全够。
+  后端每次请求都新起一个 worker，扩展只回执最大的 seq，先发那个 slot 永远等不到回执
+  → 2.5s 后走 `code` / `os.startfile` 回落 → 同一个语料文件被两个程序各打开一次
+  （两边都能写，谁后保存谁覆盖）。修：`corpusOpenBusy` 在途标志。
+- **底板采样的"重试 20 次"是死代码，第一次失败就永久锁定**（`ui.html`）
+  `cardSamples++` 排在失败检查**之前**：第 6 次一旦失败，`cardSamples` 已经停在 6，
+  函数开头 `cardSamples >= CARD_SAMPLES` 把后续每次调用都挡回，`cardFailures` 永远到不了
+  20 → 本次会话再也不画角色底板，而 `updateCharCard` 一条日志都没有。
+  修：计数只在成功时递增。
+- **`clipBubbleText` 可能切出半个代理对**（`ui.html`）
+  `slice` 按 UTF-16 码元走，第 200 个码元正好是某个 emoji 的高位代理时，切出来的是孤立
+  代理 —— 气泡里显示成 `�`，而且这个坏字符会一路进 SSE 帧。修：切点落在高位代理时退一
+  码元。
+
 ## [0.3.42] — 2026-10-23
 
 ### Fixed
