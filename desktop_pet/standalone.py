@@ -1586,6 +1586,19 @@ def main(port=None):
         else:
             log(f'[airi-dwm] WARNING: 没能关掉 Mica backdrop（{detail}）')
 
+        # ⚠️ 配置就是"别动底色"时不要再重试（0.3.43）。
+        # fix_window_background() 在 win_bg_mode()=='off' 时**必然**返回
+        # (False, 'AIRI_WIN_BG=off（不动底色）')，而下面这个循环只认 ok，
+        # 于是白白跑满 10 秒（40 × 0.25s），最后再打一条根本不是故障的
+        # WARNING（"气泡/名牌周围可能还会有一圈浅色方块"）—— 排障时这条会
+        # 把人往 DWM/Form 方向带。
+        # 0.3.41 只在 main.py 补了这段短路，standalone（真正的主入口）漏了：
+        # 同一个坑的第二个调用点。注意前面那个 Mica 循环已经吃掉了最长 20 秒，
+        # 这里再来 10 秒，用户看到的就是"启动快半分钟"。
+        if win_bg_mode() == 'off':
+            log(f'[airi-winbg] skipped: {win_bg_mode()}（按配置不动底色）')
+            return
+
         bg_deadline = time.time() + 10
         while time.time() < bg_deadline:
             ok, detail = fix_window_background(window)
