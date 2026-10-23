@@ -1132,6 +1132,15 @@
       while (guard++ < 8) {
         var box = bubbleArea.getBoundingClientRect();
         if (box.top >= 6) return;
+        // ⚠️ 先把"已经决定要消失"的情气泡立刻请走（0.3.43）。
+        // .fade-out 只改 opacity/transform，**不脱离文档流** —— 那 450ms 里
+        // 它照样占着高度，而下面的 bs 查询恰好把它排除了。于是这句
+        // `bs[0].remove()` 删掉的是**刚出现的第二条**：用户看到最旧的一条
+        // 优雅淡出、新的那条啪一下没了（可能只说到半句）。
+        // 三条两行以上的连续消息就能复现（3×2 行 + 2×gap ≈ 206px >
+        // 气泡区可用高度 ≈ 200px），MAX_BUBBLES=2 等于退化成只留一条。
+        var dying = bubbleArea.querySelector('.bubble[data-removing]');
+        if (dying) { dying.remove(); continue; }
         var bs = bubbleArea.querySelectorAll('.bubble:not([data-removing])');
         if (bs.length > 1) { bs[0].remove(); continue; }
         if (!bs.length) return;
@@ -1159,8 +1168,17 @@
     function clipBubbleText(text) {
       if (typeof text !== 'string') { text = String(text); }
       if (text.length <= MAX_BUBBLE_CHARS) { return text; }
-      return text.slice(0, MAX_BUBBLE_CHARS) + '…（已省略 '
-        + (text.length - MAX_BUBBLE_CHARS) + ' 字）';
+      // ⚠️ 不能切在代理对中间（0.3.43）：slice 按 UTF-16 **码元**走，第 200
+      // 个码元正好是某个 emoji（💢/🐳 之类）的高位代理时，切出来的是孤立
+      // 代理 —— 气泡里显示成 "�"，而且这个坏字符会一路进 SSE 帧
+      // （standalone 的 _sse_safe 就是为它兜的）。退一码元即可。
+      // 顺带：text.length 把 emoji 算 2，所以"200 字"实际可能只有 100 个
+      // emoji —— 那是既有口径，不改。
+      var cut = MAX_BUBBLE_CHARS;
+      var code = text.charCodeAt(cut - 1);
+      if (code >= 0xD800 && code <= 0xDBFF) { cut--; }
+      return text.slice(0, cut) + '…（已省略 '
+        + (text.length - cut) + ' 字）';
     }
 
     // 打字机效果：逐字显示，让气泡更生动
@@ -1400,7 +1418,16 @@
     // 系统抢走指针（触摸被取消、窗口失焦）时也要收手
     petArea.addEventListener('pointercancel', function() { endDrag(null); });
     // 最后一道：Alt+Tab 走开时别把拖拽状态留在半路
-    window.addEventListener('blur', function() { if (dragging) { endDrag(null); } });
+    window.addEventListener('blur', function() {
+      if (dragging) { endDrag(null); }
+      // ⚠️ 失焦也要收菜单（0.3.43）。窗口是 on_top=True，右键菜单会一直浮在
+      // 最上层；而唯一的关闭路径是 **document 上的 click** —— 用户切到别的
+      // 程序时那个 click 落在别的进程里，根本不触发，菜单就一直开着。
+      // 回来后习惯性地点一下角色（正好在刚才右键的位置），就会命中菜单第一项
+      // 「退出 deepseek」（它就压在光标下方 5~33px）：一次"看一眼菜单"变成
+      // "桌宠自己没了"，而且用户完全没有因果线索。
+      if (contextMenu.classList.contains('show')) hideMenu();
+    });
 
     // ---- 命中判定：读 canvas 的 alpha ----
     // 这个模型没有声明 Cubism HitAreas，引擎的 hitTest() 用不了，
