@@ -1675,9 +1675,6 @@
       // 模型一直在做 idle 动作（呼吸/微摆），外接框每次都会差几个像素。
       // 卡跟着变 = 每 500ms 抖一下，比白边本身难看得多。
       // 先采几次取并集（= 把摆动范围整个包住），然后焊死。
-      cardSamples++;
-      if (cardSamples < CARD_SAMPLES) return;
-
       var vw = document.documentElement.clientWidth || window.innerWidth || 0;
       var vh = document.documentElement.clientHeight || window.innerHeight || 0;
       // ⚠️ 0.3.41 —— 以前这两条失败分支写的是 `cardSamples = CARD_SAMPLES - 1`
@@ -1689,6 +1686,15 @@
       if (!vw || !vh) { if (++cardFailures >= CARD_MAX_FAILURES) cardSamples = CARD_SAMPLES; return; }
       if (!(u[2] > u[0]) || !(u[3] > u[1])) { if (++cardFailures >= CARD_MAX_FAILURES) cardSamples = CARD_SAMPLES; return; }
       cardFailures = 0;
+
+      // ⚠️ 采样计数只在**成功**时递增（0.3.43）。以前是"先 +1 再判是否到 6"，
+      // 于是第 6 次一旦失败，cardSamples 已经停在 6 → 函数开头那句
+      // `if (cardSamples >= CARD_SAMPLES) return` 把后续每次调用都挡回，
+      // cardFailures 永远到不了 20 —— 注释承诺的"重试 20 次再放弃"是死代码，
+      // 实际行为是"第一次失败就永久锁定"：本次会话再也不画角色底板，
+      // 而 updateCharCard 全函数一条日志都没有，用户只看到白卡没了。
+      cardSamples++;
+      if (cardSamples < CARD_SAMPLES) return;
 
       var pad = (CHAR_CARD === 'all') ? CARD_PAD_ALL : CARD_PAD;
       var w = (u[2] - u[0]) + pad * 2;
