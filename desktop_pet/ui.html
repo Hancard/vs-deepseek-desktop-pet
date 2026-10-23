@@ -1061,6 +1061,18 @@
         };
       } catch (err) {
         live2d.failed = true;
+        // ⚠️ 这里是**半初始化**的清场（0.3.42）：ready=true 在前面就写上了，
+        // 而 `await model.motion(...)` 抛错会直接跳到这个 catch。此刻
+        // live2dStage 已 visible、charBox 已 live2d-active、模型已经挂在
+        // canvas 上 —— 直接 showImageCharacter() 会把那张不透明 PNG 垫到
+        // canvas 底下，模型透明区正好透出它，也就是上面注释里最怕的
+        // "两个角色叠在一起"。必须先把"Live2D 已接管"的所有痕迹撤干净。
+        live2d.ready = false;
+        live2d.model = null;
+        live2d.app = null;
+        live2dStage.classList.remove('visible');
+        charBox.classList.remove('live2d-active');
+        charBox.style.removeProperty('animation');
         if (window.console && console.warn) {
           console.warn('[airi] Live2D unavailable, falling back to image character:', err);
         }
