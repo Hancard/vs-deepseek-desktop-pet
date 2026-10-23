@@ -446,8 +446,22 @@ def log(msg=''):
     try:
         with open(LOG_PATH, 'a', encoding='utf-8') as fh:
             fh.write(line + '\n')
-    except OSError:
-        pass
+    except (OSError, ValueError):
+        # ⚠️ 必须同时兜 UnicodeError（0.3.43）：它是 ValueError 的子类，
+        # **不是** OSError。msg 里只要混进一个孤立代理字符
+        # （`/event` 的 method 字段来自外部；`json.dumps(..., ensure_ascii=False)`
+        # 原样保留），open(...).write() 就会抛 UnicodeEncodeError，而这个
+        # 调用点不在任何 try 里 —— 写日志本身把 worker 线程打死：
+        # "台词库给你在 VS Code 里打开了…" 那句气泡永远发不出去，文件却
+        # 真的打开了。上面 print 那一半早就兜了 UnicodeEncodeError，两半
+        # 不对称本身就是线索。
+        # ⚠️ 但也**不能只 pass**：日志是唯一通道（扩展以 stdio:'ignore' 起
+        # 进程），丢掉整行等于什么都没记。退化成 replace 后的形式再写一次。
+        try:
+            with open(LOG_PATH, 'a', encoding='utf-8') as fh:
+                fh.write(line.encode('utf-8', 'replace').decode('utf-8') + '\n')
+        except OSError:
+            pass
 
 
 def _init_log():
@@ -570,15 +584,55 @@ def _as_text(value) -> str:
     return str(value)
 
 
+def _sse_safe(frame: str) -> str:
+    """把一帧 JSON 变成"一定能用 utf-8 编码出去"的字符串（0.3.43）。
+
+    ⚠️ 这是一个**单点故障能让桌宠永久失声**的地方，触发还不需要攻击者：
+    · Python 的 str 可以合法地含**孤立代理字符**（`'\\ud83d'`）—— 它不是
+      非法状态，只是不能编码成 utf-8；
+    · 来源之一是本扩展自己：`clipMessage()` 用 `slice(0, maxLen-1)` 按
+      **UTF-16 码元**截断（extension.ts），第 59 个码元正好是某个 emoji 的
+      前半时，切出来就是孤立代理，JSON 序列化后经 /push 到这边；
+    · 来源之二是任何本机客户端：`POST /push {"payload":{"text":"\\ud800"}}`；
+    · `json.dumps(..., ensure_ascii=False)` 会把它原样留在串里，随后
+      `f'...'.encode('utf-8')` 抛 UnicodeEncodeError —— 写帧在 try 里，
+      异常被 `except Exception: pass` 吞掉、连接关闭、日志零行；
+    · 更糟的是坏消息**留在 sse_queue 里**且排在所有后续消息前面：前端
+      EventSource 自动重连→带 Last-Event-ID→从这条开始重播→再炸，
+      3 秒一轮无限循环；新开页面也会撞上最近 20 条重播窗口。
+      结果：桌宠再也不出任何气泡，只有重启进程（或再灌 200 条把它挤出去）
+      才能恢复。
+
+    修法：入队前做一次"可编码化"。replace 只会把孤立代理变成 '?'，
+    正常文本一个字节都不动。
+    """
+    try:
+        frame.encode('utf-8')
+        return frame
+    except UnicodeEncodeError:
+        return frame.encode('utf-8', 'replace').decode('utf-8')
+
+
+def _sse_write_failed(exc, where):
+    """SSE 写失败：客户端断连是常态（不吵），其它一律留痕（0.3.43）。
+
+    以前这里只有 `except Exception: pass/return`，连编码错误都不留一行 ——
+    上面 _sse_safe 的注释描述的正是"无声失声"。
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return
+    log(f'[airi-sse] {where} failed: {exc!r}')
+
+
 def push_message(msg_type: str, text: str, emotion: str = "idle"):
     """向 SSE 客户端推送消息。超过上限时丢弃最旧的消息。"""
     global _seq
     with queue_lock:
         _seq += 1
-        sse_queue.append((_seq, json.dumps(
+        sse_queue.append((_seq, _sse_safe(json.dumps(
             {"type": msg_type, "payload": {"text": text, "emotion": emotion}},
             ensure_ascii=False
-        )))
+        ))))
         if len(sse_queue) > MAX_QUEUE_SIZE:
             del sse_queue[:len(sse_queue) - MAX_QUEUE_SIZE]
     _warn_if_js_stalled()
@@ -1096,7 +1150,8 @@ class AiriHandler(BaseHTTPRequestHandler):
                         try:
                             self.wfile.write(f'id: {_seq_no}\ndata: {d}\n\n'.encode('utf-8'))
                             self.wfile.flush()
-                        except Exception:
+                        except Exception as exc:
+                            _sse_write_failed(exc, 'stream write')
                             return
                     if new_msgs:
                         _idle_ticks = 0
@@ -1108,10 +1163,11 @@ class AiriHandler(BaseHTTPRequestHandler):
                     try:
                         self.wfile.write(b':hb\n\n')
                         self.wfile.flush()
-                    except Exception:
+                    except Exception as exc:
+                        _sse_write_failed(exc, 'heartbeat')
                         return
-            except Exception:
-                pass
+            except Exception as exc:
+                _sse_write_failed(exc, 'stream')
         elif self.path == '/ping':
             self._json_response({'status': 'ok', 'server': 'airi-standalone'})
         elif self.path == '/settings':
