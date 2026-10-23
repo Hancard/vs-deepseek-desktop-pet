@@ -2,7 +2,7 @@
   "name": "vscode-anime-assistent",
   "displayName": "deepseek Monitor",
   "description": "Anime desktop pet for VS Code — tsundere deepseek watches your code and roasts your bugs",
-  "version": "0.3.41",
+  "version": "0.3.42",
   "publisher": "123457890wasd-cmyk",
   "repository": {
     "type": "git",

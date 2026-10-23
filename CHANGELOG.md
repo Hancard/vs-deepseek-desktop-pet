@@ -1,5 +1,92 @@
 # Change Log
 
+## [0.3.42] — 2026-10-23
+
+### Fixed
+
+- **立绘还在加载时点角色完全没反应**（`ui.html`）
+  `showImageCharacter()` 在设 `src` **之前**就把 CSS 角色撤了（`remove('visible')`），
+  而图片从设 src 到 decode 完成之间 `getBoundingClientRect()` 是 0×0 ——
+  `alphaAt()` 的 `fr.width < 1` 于是恒成真，`handlePetClick` 里
+  `alphaAt(...) < 24` 恒成立，`api.pet_click` 一次都不调。首帧几十~几百 ms；
+  立绘 URL 挂起时要一直持续到 `onerror`。前端零报错、日志零痕迹。
+  修：CSS 角色改到 `onload` 之后再撤（`onerror` 则重新显示），这段时间命中
+  判定落到它身上。
+- **情绪图加载竞态：慢的旧情绪覆盖快的新情绪**（`ui.html`）
+  `setEmotion` 起一个 `Image` 去探测情绪图，在 `onload/onerror` 回调里才切
+  `charImg.src`。回调触发顺序 = 网络返回顺序，不等于调用顺序：连着切两个
+  情绪时，先请求的那张若后返回，会把已经切好的新情绪**盖回旧的** —— 表情
+  和刚说的那句话对不上。修：回调里比对"当前想要的表情"，过期的一律丢弃。
+- **Live2D 初始化失败后停在半初始化状态**（`ui.html`）
+  `catch` 里只置 `live2d.failed = true` 并调 `showImageCharacter()`，但
+  `live2d.ready` / `model` / `app` 保留了失败**前**已经赋过的值（初始化是
+  分步的，中途抛错时可能已经赋了一部分）。此后 `alphaAt()` 走
+  `if (!live2d.ready || !live2d.app)` 的**另一条**分支，读的是那个已经废掉
+  的 canvas —— 命中判定落在一个不存在/没画面的 canvas 上。修：catch 里把
+  `ready` / `model` / `app` 一并复位。
+- **拖拽过程中异步回填的坐标会把拖拽起点冲掉**（`ui.html`）
+  按下时先用本地值记 `winStartX/Y`，再异步问 `get_position()` 拿真实坐标
+  回填。回填的 Promise 不保证在松手前回来：拖到一半回来就把起点改成了一个
+  陈旧值，下一次 `pointermove` 用「新鼠标位置 − 旧起点」算出的位移是错的
+  —— 桌宠**瞬移**。修：拖拽期间（`dragging`）不再回填。
+- **内联 `animation` 打穿 `.live2d-active` 的规则**（`ui.html`）
+  切到 Live2D 时先 `classList.add('live2d-active')`（CSS 里有
+  `animation: none`），紧接着又写内联 `charBox.style.animation = ...`。内联
+  样式优先级高于 class，且**永不恢复** —— CSS 那条规则等于失效，Live2D
+  渲染时还在跑 CSS 抖动。修：加 class 后立刻 `removeProperty('animation')`。
+
+- **`disable_window_backdrop` 在不支持该属性的系统上恒 False**（`common.py`）
+  `DWMWA_SYSTEMBACKDROP_TYPE`(38) 是 Windows 11 build 22000 才有的，Win10
+  /DWM 合成被禁用的会话里 Get 和 Set 都返回 `E_INVALIDARG` → `before =
+  after = -1`、`ok = False`、`after == DWMSBT_NONE` 为假，三个条件一起把结
+  论钉死成 False。而**两处**调用方都是 `while 到 20 秒 deadline` 只认 `ok`
+  的循环：① 平白空转 20 秒；② 打出一条"没能关掉 Mica backdrop"的 WARNING
+  —— 这台机器上根本没有 Mica 可关，这条会把排障彻底带偏；③ 更要紧的是
+  底色修复 `fix_window_background()` **串行排在这个循环之后**，那 20 秒里一
+  次都不会被调，用户看到的就是"气泡/名牌周围那圈浅色方块要过 20 秒才消
+  失"。修：读不到这个属性（`< 0`）直接判定"无需关闭"并返回 True。
+- **`move_window` 的钳制一抛异常，窗口就完全不动**（`common.py`）
+  注释写的是"钳制失败就按原坐标移 —— 移动永远不能挂"，但整个钳制和
+  `self._window.move(...)` 在**同一个** `try` 里：钳制里任何一步抛异常
+  （`get_virtual_screen` 返回 None 以外的异常、窗口尺寸属性访问失败、
+  `int()` 抛 ValueError）都会把 `move()` 一起跳过，表现是**拖不动**，和注
+  释承诺的正好相反。修：钳制单独 `try`，失败只用原坐标继续 `move()`。
+
+- **检测周期读到 `null` 被打成 1 秒**（`extension.ts`）
+  `readDetectIntervalMs` 用 `Number(data?.detectIntervalSec)` 之后判
+  `Number.isFinite` —— 但 `Number(null)` 是 **0**（不是 NaN），能通过
+  `isFinite`，再被下游夹到最小值：设置里存的是"未配置/关掉"，读出来变成
+  每秒扫一次。修：显式排除 `null` / `''` / `undefined` 这类 falsy 值。
+- **推送给 webview 的诊断条目没截断，与注释承诺不符**（`extension.ts`）
+  注释写"最多 20 条"，实际 `items` 直接把整个数组塞进 postMessage：工作
+  区错误多的时候一条几 KB 的 message 全量过桥，webview 侧渲染也跟着卡。
+  修：按注释截断到 20 条。
+- **推送签名不含 count，第 21 条之后的修复被吞**（`extension.ts`）
+  `signature` 只拼了前 20 条的 `file|line|message`：错误从 30 条修到 5 条
+  时，前 20 条之外的变化**不影响签名**，而总数变了却没进签名 —— 于是
+  "从 30 修到 5"和"从 25 修到 5"这两种情况的签名可能相同，桌宠该报喜的
+  时候不报。修：签名里加上 `count`。
+
+- **pywebview 缺失时进程永久存活，扩展谎报"已启动"**（`standalone.py`）
+  `except ImportError` 分支里是 `while True: time.sleep(1)`：HTTP 服务还在，
+  所以扩展的存活探测**一直成功**，状态栏显示已启动，但窗口永远出不来 ——
+  而且 Ctrl-C 之外没有任何办法让它退出（僵尸进程）。修：记日志后直接
+  `sys.exit(1)`，让扩展的存活探测如实失败。
+- **`/push` 的 else 分支没有归一化文本**（`standalone.py`）
+  只改了 `payload` 分支：走 else 的 plain 消息里 `message` 若是数字/对象
+  （外部 POST 的内容不可信），前端 `typeText` 的 `charAt` 直接抛
+  `TypeError` —— 气泡空白 + jsError 黑匣子报警。修：抽 `_as_text()`，两个
+  分支都走。
+- **`/settings` 落盘失败时不回滚内存**（`standalone.py`）
+  先改内存 `settings['detectIntervalSec']` 再 `save_settings`；写盘失败
+  （只读/磁盘满/权限）时内存已经改了，界面显示新值、重启后又变回旧值，
+  而且 `saved:false` 只对这一次请求可见。修：失败时把内存回滚成旧值。
+- **SSE 线程在客户端断连后滞留**（`standalone.py`）
+  `while True: time.sleep(0.3)` 只在**写失败**时才 return：客户端早就断了
+  但写缓冲还没满（内核 socket 缓冲 + 无心跳），线程一直活着，每 0.3 秒扫
+  一次队列，直到下次推送失败才退出。同时挂着多个断连客户端时，这些线程
+  就是纯空转。修：每轮写一个心跳注释行（写失败即退出）。
+
 ## [0.3.41] — 2026-10-22
 
 ### Fixed
