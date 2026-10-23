@@ -2057,6 +2057,11 @@
     var settingsSeq = 0;
     var detectPostTimer = null;
     var pendingDetectSec = null;
+    // 一次连点 burst 的**起点**值（0.3.43）。见 setDetectSec：prev 不能每次
+    // 点击各记一个 —— clearTimeout 会把前几次的闭包连同它的 prev 一起丢掉，
+    // 只有最后一个活到 POST，于是失败回滚到的是"连点过程中的某个中间值"，
+    // 而那个值**从来没落过盘**，界面上显示的值和磁盘上的值都不是它。
+    var burstPrev = null;
 
     function detectFailed(prev, seq) {
       if (seq !== settingsSeq) return;   // 已经有更新的操作了，别抢它的结果
@@ -2095,7 +2100,11 @@
     function setDetectSec(sec) {
       var next = clampDetect(sec);
       if (next === detectSec) return;
-      var prev = detectSec;
+      // ⚠️ 只在 burst **起点**记一次 prev（0.3.43）。见 burstPrev 的注释：
+      // 连点 5 下时闭包里的 prev 依次是 30/31/32/33/34，只有最后一个的
+      // timer 活下来，POST 失败就回滚到 34 —— 可磁盘上真正生效的是 30，
+      // 界面停在 34，用户看到的"没保存成功"和显示的值互相矛盾。
+      if (pendingDetectSec === null) burstPrev = detectSec;
       detectSec = next;
       renderDetectLabels();
       repushMenuRegion();      // 「1 秒」比「30 秒」窄，面板宽度变了就要重推 region
@@ -2107,8 +2116,13 @@
       detectPostTimer = setTimeout(function() {
         detectPostTimer = null;
         var target = pendingDetectSec;
+        var base = burstPrev;
         pendingDetectSec = null;
-        if (target !== null) postDetectSec(target, prev);
+        burstPrev = null;
+        if (target === null) return;
+        // base 理论上不会是 null（pendingDetectSec === null 时刚设过）；
+        // 万一真拿到 null，宁可不回滚也不要写成 detectSec = null
+        postDetectSec(target, base === null ? target : base);
       }, 150);
     }
 
