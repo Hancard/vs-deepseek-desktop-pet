@@ -1187,7 +1187,12 @@ class AiriHandler(BaseHTTPRequestHandler):
             try:
                 msg = json.loads(body)
             except Exception:
-                push_message('chatMessage', body, 'idle')
+                # ⚠️ 这条和下面那条必须同口径（0.3.43）：body 的上限是
+                # MAX_BODY_BYTES=1MB，解析失败时原样入队，单条 SSE 事件就接近
+                # 1MB；队列上限 200 条 → 最坏 ~200MB 常驻内存，而且每个 SSE
+                # 连接每次都要写 1MB。非对象分支早就截到 500 了，这条漏了，
+                # 而注释只承诺了"超长截断"这一种口径。
+                push_message('chatMessage', body[:500], 'idle')
                 self._json_response({'status': 'pushed'})
                 return
             if not isinstance(msg, dict):
