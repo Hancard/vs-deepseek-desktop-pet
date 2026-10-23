@@ -538,6 +538,8 @@ def disable_window_backdrop(window):
     ok = _set_backdrop_none(hwnd)
     after = get_backdrop_type(hwnd)
 
+    # ⚠️ "读不到这个属性"不等于"没关掉"（0.3.42）—— 判断在最后，注释见
+    # 函数末尾 return 之前那一段。
     guarded = bool(getattr(form, '_airi_backdrop_guarded', False))
     if not guarded:
         try:
@@ -557,6 +559,21 @@ def disable_window_backdrop(window):
 
     detail = ('hwnd=%s backdrop=%s->%s set=%s guarded=%s'
               % (hex(hwnd), before, after, ok, guarded))
+    # ⚠️ "读不到这个属性"不等于"没关掉"（0.3.42）。
+    # DWMWA_SYSTEMBACKDROP_TYPE(38) 是 Windows 11 (build 22000) 才有的属性，
+    # Win10 以及 DWM 合成被禁用的会话里 Get/Set 都返回 E_INVALIDARG，于是
+    # before=after=-1、`ok=False`、`after == DWMSBT_NONE(1)` 为假 —— 三个
+    # 条件一起把结论钉死成 False。而两处调用方（standalone / main 的
+    # _after_window_ready）都是 `while 到 20 秒 deadline` 只认 ok 的循环：
+    # ① 平白空转 20 秒；② 打出一条"没能关掉 Mica backdrop"的 WARNING ——
+    # 可这台机器上根本没有 Mica 可关，这条会把排障彻底带偏（和 0.3.41 修的
+    # AIRI_WIN_BG=off 白等 10 秒是同一类）；③ 更要紧的是底色修复是**串行排
+    # 在这个循环之后**的，那 20 秒里 fix_window_background() 一次都不会被调，
+    # 用户看到的就是"气泡/名牌周围那圈浅色方块要过 20 秒才消失"。
+    # 注意判断放在最后：上面的 guard 照样装上，万一以后属性变成可读，
+    # 主题切换时仍会被按回去。
+    if before < 0 and after < 0:
+        return True, detail + ' (attr unsupported: no Mica on this system)'
     return (ok and after == DWMSBT_NONE), detail
 
 
