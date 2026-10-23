@@ -569,16 +569,7 @@ function handleDiagnosticsChanged(): void {
 	// 实例化错误那种几 KB 的消息会把列表项撑爆。而且这条路是**每次诊断变化
 	// 都触发**（下面那句注释特意说"面板保持实时"），频次比走 30 秒一拍的
 	// 桌宠推送高得多，更需要裁。
-	postToWebview({
-		type: 'diagnostics',
-		payload: {
-			count: workspaceErrors.length,
-			items: workspaceErrors.slice(0, 20).map((e) => ({
-				...e, message: clipMessage(e.message, 200),
-			})),
-			timestamp: new Date().toISOString(),
-		},
-	});
+	postToWebview(buildDiagnosticsMessage(workspaceErrors));
 
 	// 标脏即可：真正的推送在下一个响应 tick（petTick → pushPendingDiagnostics）。
 	// 此前这里是实时推送——每敲一个字母触发诊断变化，桌宠就收到并报一次。
@@ -792,6 +783,18 @@ function createOrShowAssistantPanel(context: vscode.ExtensionContext): void {
 		{ enableScripts: true, retainContextWhenHidden: true }
 	);
 	panel.webview.html = getWebviewHtml(STANDALONE_PORT);
+	// ⚠️ 面板打开时必须推一次快照（0.3.43）。
+	// 以前创建完就返回，而 HTML 里 #list 的初始内容写死的是
+	// "没有错误 — 一切正常"：工作区明明挂着十几个错误、只是没人在打字
+	// （onDidChangeDiagnostics 不再触发），用户打开面板看到的是**一条假的
+	// 结论**，会以为已经修好了。这不是"没刷新"，是主动显示错误的安慰。
+	// 用 ready 握手而不是直接 postMessage：webview 页面还没加载完时发出去
+	// 的消息会被丢掉，只有页面自己说"我准备好了"才可靠。
+	panel.webview.onDidReceiveMessage((msg: unknown) => {
+		if ((msg as { type?: string } | undefined)?.type === 'ready') {
+			pushDiagnosticsSnapshot();
+		}
+	});
 	panel.onDidDispose(() => {
 		// 顺手把自己从 subscriptions 里摘掉：不摘的话每"开→关"一轮就多留
 		// 一个已 dispose 的 WebviewPanel（连带它的 webview 资源句柄），
@@ -806,6 +809,25 @@ function createOrShowAssistantPanel(context: vscode.ExtensionContext): void {
 function postToWebview(message: unknown): void {
 	if (!panel) { return; }
 	void panel.webview.postMessage(message);
+}
+
+/** 诊断面板要的那条消息（count 用工作区整体口径，items 裁到 20 条） */
+function buildDiagnosticsMessage(errors: ErrorItem[]): unknown {
+	return {
+		type: 'diagnostics',
+		payload: {
+			count: errors.length,
+			items: errors.slice(0, 20).map((e) => ({
+				...e, message: clipMessage(e.message, 200),
+			})),
+			timestamp: new Date().toISOString(),
+		},
+	};
+}
+
+/** 面板首帧快照（0.3.43）：开关面板时不能让它停在写死的初始文案上 */
+function pushDiagnosticsSnapshot(): void {
+	postToWebview(buildDiagnosticsMessage(collectErrors()));
 }
 
 function getWebviewHtml(port: number): string {
@@ -839,5 +861,9 @@ window.addEventListener('message',function(e){
     html+='<div class="error-item"><div class="msg">'+esc(e.message)+'</div><div class="meta">'+esc(e.languageId)+' | '+esc(fname)+':'+esc(e.line)+'</div></div>';
   });list.innerHTML=html;
 });
+// 告诉扩展"页面已就绪，可以推首帧了"（0.3.43）。不握手的话扩展那边
+// postMessage 可能早于页面加载完成，消息会被 webview 直接丢弃，
+// 面板就停在 HTML 里写死的"没有错误 — 一切正常"上。
+vscode.postMessage({type:'ready'});
 </script></body></html>`;
 }
