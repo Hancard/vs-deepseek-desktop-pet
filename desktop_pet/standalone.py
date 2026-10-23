@@ -1204,8 +1204,11 @@ class AiriHandler(BaseHTTPRequestHandler):
                 log(f'[airi-standalone] /event parse failed: {exc!r}')
             self._json_response({'status': 'ok'})
         elif self.path == '/settings':
-            # 写设置（右键菜单「检测周期」）。只改这一个键，值一律夹到
-            # [DETECT_MIN_SEC, DETECT_MAX_SEC]；坏输入不猜、直接 400。
+            # 值一律夹到 [DETECT_MIN_SEC, DETECT_MAX_SEC]，无法解析时回落默认
+            # 30；只有 body 非对象（上面）或缺这个键（下面）才是 400。
+            # （0.3.42 更正：以前这里写"坏输入不猜、直接 400"，而实现一直是
+            #  clamp_detect_sec 回落默认 + 200 —— 注释说反了，会误导后来人
+            #  以为这条路径会拒绝。回落比拒绝更合理，所以改的是注释。）
             body = self._read_body()
             if body is None:
                 return
@@ -1260,6 +1263,17 @@ class AiriHandler(BaseHTTPRequestHandler):
                 cur = clamp_detect_sec(msg.get('detectIntervalSec'))
                 settings['detectIntervalSec'] = cur
                 saved = save_settings(settings)
+                # ⚠️ 落盘失败必须把内存值还原（0.3.42）。
+                # 这个键有**两个**消费者：桌宠自己读内存（GET /settings →
+                # settings_payload()），扩展读磁盘（readDetectIntervalMs）。
+                # 以前只改内存、不回滚：目录只读 / OneDrive 占位 / 被杀软拦下
+                # os.replace 时，桌宠按新周期跑、扩展按旧周期推 —— 两边分叉。
+                # 而且界面会更迷惑：前端看到 saved:false 会回滚显示，可下次
+                # 右键菜单 syncDetectSec() 又 GET 到内存里的新值，界面自己
+                # "跳回去"（ui.html 那条注释描述的观感，成因不同但一样怪）。
+                if not saved:
+                    settings['detectIntervalSec'] = prev
+                    log('[airi-settings] save failed -> reverted to %ds' % prev)
             if cur != prev or not saved:
                 # 改周期是"会影响观感"的操作，日志里留一条，省得排查
                 # "为什么它突然变得这么爱说话"时无从下手。
