@@ -553,9 +553,21 @@ function handleDiagnosticsChanged(): void {
 
 	// 发送到 Webview 备用面板（同样使用工作区整体口径，避免误导）
 	// 面板是用户主动打开的，保持实时；桌宠气泡走响应时钟（petTick）
+	// ⚠️ 这条也得裁（0.3.42）：pushPendingDiagnostics 上面那句注释写的是
+	// "连同 webview 一起用裁剪后的文本"，但这里以前是 slice(0, 20) 原样投喂
+	// —— 注释是空的。面板 HTML 直接 esc(e.message) 渲染完整文本，C++ 模板
+	// 实例化错误那种几 KB 的消息会把列表项撑爆。而且这条路是**每次诊断变化
+	// 都触发**（下面那句注释特意说"面板保持实时"），频次比走 30 秒一拍的
+	// 桌宠推送高得多，更需要裁。
 	postToWebview({
 		type: 'diagnostics',
-		payload: { count: workspaceErrors.length, items: workspaceErrors.slice(0, 20), timestamp: new Date().toISOString() }
+		payload: {
+			count: workspaceErrors.length,
+			items: workspaceErrors.slice(0, 20).map((e) => ({
+				...e, message: clipMessage(e.message, 200),
+			})),
+			timestamp: new Date().toISOString(),
+		},
 	});
 
 	// 标脏即可：真正的推送在下一个响应 tick（petTick → pushPendingDiagnostics）。
