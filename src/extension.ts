@@ -418,8 +418,16 @@ async function pushPendingDiagnostics(): Promise<boolean> {
 	// 相同错误状态不重复推送（避免每次诊断事件都让 Airi 重复吐槽）
 	// 签名用**裁剪后**的文本：和真正发出去的 items 保持一致，否则同一批
 	// 错误的签名会因为 message 里那些超长尾巴而无谓地变长
+	// ⚠️ 签名必须带上总数（0.3.42）。items 只取前 20 条，count 却是全量：
+	// 工作区 25 个错误时推一次，用户接着把**第 21~25 个**修掉（前 20 条一条
+	// 没动）—— items 还和上次一模一样，签名不变 → return true → petTick 里
+	// 的 diagPushPending 被当成"已消费"清掉。这次修复**永远不会播报**：
+	// count 从 25 变成 20 但签名没变，之后只有前 20 条再动才会重新开口。
+	// 用户修了 5 个 bug，桌宠一声不吭 —— 与"脏标记不可吞"同源，只是丢在
+	// 签名这一层（count 本来就在 payload 里，只是没进签名）。
 	const signature = JSON.stringify([
 		(message as { type?: string }).type ?? (message as { trigger?: string }).trigger,
+		workspaceErrors.length,
 		items.map((e) => `${e.file}|${e.line}|${e.message}`),
 	]);
 	if (signature === lastPushSignature) { return true; }
