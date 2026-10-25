@@ -1190,7 +1190,18 @@
         // 脱离文档的节点里打字 —— 长文案被打断时这里会空转好几分钟。
         if (!el.isConnected) { return; }
         if (i < text.length) {
-          el.textContent += text.charAt(i++);
+          // ⚠️ 一次吞掉整个**码点**（0.3.44）。charAt 走的是 UTF-16 码元，
+          // emoji 会被拆成"高位代理 + 低位代理"两帧：第一帧的孤立代理渲染
+          // 成 "�"，下一帧才拼回去 —— 每个 emoji 都闪一下方块。
+          // 0.3.43 只修了 clipBubbleText（存储侧），打字机这半边没跟上。
+          var cp = text.charCodeAt(i);
+          var step = 1;
+          if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < text.length) {
+            var lo = text.charCodeAt(i + 1);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) { step = 2; }
+          }
+          el.textContent += text.substr(i, step);
+          i += step;
           setTimeout(type, speed);
         }
       })();
