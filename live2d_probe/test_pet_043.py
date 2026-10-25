@@ -667,19 +667,23 @@ except Exception as exc:
     check('D2 段整体未崩', False, '%s: %s' % (type(exc).__name__, exc))
 
 
-section('D3 连点后的回滚要回到 burst 起点')
+section('D3 连点后的回滚要回到"最后确认落盘"的值')
 
 try:
     seg = grab(HSRC, '    function setDetectSec(sec) {', '\n    }\n')
     check('D3-0 抠到 setDetectSec', bool(seg), 'len=%d' % len(seg))
-    check('D3-1 有 burstPrev 这个概念（只看最后一次的 prev 会滚到中间值）',
-          'burstPrev' in HSRC)
-    check('D3-2 burstPrev 有模块级声明',
-          'var burstPrev = null;' in HSRC)
+    # ⚠️ 0.3.44 改了语义：0.3.43 用的 burstPrev（burst 起点）在"停 >150ms
+    # 再点"时记的是**没落盘的乐观值**，回滚会落到磁盘上从未生效的数。现在
+    # 基准是 diskDetectSec = 最后一次服务端确认的值。本用例同步成新语义。
+    check('D3-1 回滚基准是"最后确认落盘"的值', 'diskDetectSec' in HSRC)
+    check('D3-2 diskDetectSec 有模块级声明',
+          'var diskDetectSec = detectSec;' in HSRC)
 
     js = r"""
 var detectSec = 30, detectMin = 1, detectMax = 60;
-var pendingDetectSec = null, detectPostTimer = null, burstPrev = null;
+var pendingDetectSec = null, detectPostTimer = null;
+var settingsSeq = 0;
+var diskDetectSec = 30;
 var CAPTURED = [];
 function clampDetect(v) { return Math.max(detectMin, Math.min(detectMax, v)); }
 function renderDetectLabels() {}
@@ -694,12 +698,16 @@ setDetectSec(32);
 setDetectSec(33);
 if (globalThis.__T) globalThis.__T();
 console.log('CAP=' + (CAPTURED.length ? CAPTURED[0][0] + ',' + CAPTURED[0][1] : 'none'));
+// 每次点击都要作废在途响应（GET/POST 都可能还没回来）
+console.log('SEQ=' + settingsSeq);
 """
     out, err, rc = run_node(js.replace('__SEG__', seg))
     kv = kv_of(out)
     check('D3-3 node 跑通', rc == 0, 'rc=%d err=%s' % (rc, err[:300]))
-    check('D3-4 提交的是最后一次的值 33，回滚基点是**起点 30**（关键）',
+    check('D3-4 提交的是最后一次的值 33，回滚基点是**已落盘的 30**（关键）',
           kv.get('CAP') == '33,30', 'CAP=%r' % kv.get('CAP'))
+    check('D3-5 三次点击各自作废在途响应（settingsSeq 涨 3）',
+          kv.get('SEQ') == '3', 'SEQ=%r' % kv.get('SEQ'))
 except Exception as exc:
     check('D3 段整体未崩', False, '%s: %s' % (type(exc).__name__, exc))
 
@@ -709,13 +717,18 @@ section('D4 编辑语料要有在途守卫')
 try:
     check('D4-0 有 corpusOpenBusy 变量', 'var corpusOpenBusy' in HSRC)
     h = HSRC.find("if (a === 'edit-corpus')")
-    seg = HSRC[h:h + 1600] if h >= 0 else ''
+    seg = HSRC[h:h + 1800] if h >= 0 else ''
     check('D4-1 找到 edit-corpus 分支', bool(seg))
     check('D4-2 分支开头就拦在途请求（关键：180ms 过渡期内双击会发两次）',
           'if (corpusOpenBusy)' in seg and 'corpusOpenBusy = true' in seg,
           'seg=%r' % seg[:220])
-    check('D4-3 成功与失败两条路都清标志（否则一次失败就永久点不动）',
-          seg.count('corpusOpenBusy = false') >= 3,
+    # ⚠️ 0.3.44 改了释放方式：以前在 .then/.catch 里清，可那个 POST 的 RTT
+    # 只有 10~20ms，守卫比它要防的 180ms 菜单过渡窗口还短。现在靠固定时间窗。
+    check('D4-3 用固定时间窗释放（不是请求回调——RTT 只有 20ms）',
+          'corpusOpenBusy = false; }, 700' in seg,
+          'seg=%r' % seg[:260])
+    check('D4-4 回调里不再提前释放（否则守卫形同虚设）',
+          seg.count('corpusOpenBusy = false') == 1,
           'count=%d' % seg.count('corpusOpenBusy = false'))
 except Exception as exc:
     check('D4 段整体未崩', False, '%s: %s' % (type(exc).__name__, exc))
