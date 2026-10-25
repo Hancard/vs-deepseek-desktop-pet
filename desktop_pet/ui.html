@@ -2235,6 +2235,13 @@
         // 各打开一次（两边都能写，谁后保存谁覆盖），还多冒一条气泡。
         if (corpusOpenBusy) { hideMenu(); return; }
         corpusOpenBusy = true;
+        // ⚠️ 解锁靠**时间窗**，不靠请求回调（0.3.44）。0.3.43 是在 fetch 的
+        // .then/.catch 里置回 false 的，可那个 POST 在 Python 侧是"登记
+        // slot → 落盘 → 起线程 → 立刻 200"，本机 RTT 只有 10~20ms ——
+        // 守卫的存活期比它要防的 180ms 菜单过渡窗口还短，双击的第二下
+        // 照样能打进来。所以固定按住 700ms（> Windows 双击间隔上限 ~500ms，
+        // < 后端 2.5s 的回执超时），回调不再碰这个标志。
+        setTimeout(function() { corpusOpenBusy = false; }, 700);
         // 只发请求，不在这里冒泡说话 —— 真正打开成功/失败由 Python 那边
         // 决定（它要等扩展回执、还可能回落），由它推**唯一一条**结果气泡。
         // 这里先说一句就是两条气泡同时冒（MAX_BUBBLES=2）。
@@ -2244,17 +2251,15 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ openCorpus: true })
           }).then(function(r) { return r.json(); }).then(function(d) {
-            corpusOpenBusy = false;
             // 请求**到达** Python 时由它推结果气泡（它要等扩展回执、还可能
             // 三层回落）；但请求压根没到达（服务不可达 / 被 CORS 护栏挡掉）
             // 时 Python 那边什么都不会发生 —— 菜单收起、然后一片死寂，
             // 用户只能反复点，前后端日志里都零痕迹。这条气泡就是补这个洞。
             if (d && d.ok === false) { showBubble('没能打开语料文件…', true); }
           }).catch(function() {
-            corpusOpenBusy = false;
             try { showBubble('没能打开语料文件…', true); } catch (e) {}
           });
-        } catch (err) { corpusOpenBusy = false; }
+        } catch (err) {}
       }
       if (a === 'exit') {
         try { if (window.pywebview && window.pywebview.api) window.pywebview.api.exit_app(); } catch (err) {}
