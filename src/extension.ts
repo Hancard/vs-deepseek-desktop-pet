@@ -345,7 +345,17 @@ function readDetectIntervalMs(): number | undefined {
 		const data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8')) as
 			{ detectIntervalSec?: unknown };
 		const raw = (data as { detectIntervalSec?: unknown })?.detectIntervalSec;
-		const sec = typeof raw === 'number' ? raw : Number(raw);
+		// ⚠️ 只接受 number 与"纯数字字符串"（0.3.44）。以前写的是
+		// `typeof raw === 'number' ? raw : Number(raw)`，而 `Number(true)` 是 **1**
+		// （`Number(false)` 是 0，恰好被下面的 <= 0 挡住，于是只有 true 漏网）：
+		// 设置文件里写 `"detectIntervalSec": true`（合法 JSON）就把周期从 30 秒
+		// 打成 **1 秒**，每拍推一次、后端每拍起一个生成线程。同样漏的还有
+		// `Number(["45"]) === 45`（数组带单个数字字符串）。
+		// 现在布尔/数组/对象一律 NaN → 走下面的 undefined 分支保持当前值，
+		// 与 Python 侧 clamp_detect_sec 的口径一致。
+		const sec = typeof raw === 'number'
+			? raw
+			: (typeof raw === 'string' ? Number(raw) : NaN);
 		// ⚠️ 0 是 finite，`Number.isFinite` 拦不住它（0.3.42）。
 		// 而 Number(null) / Number('') / Number([]) / Number(false) 全都是 0，
 		// 于是"字段非法返回 undefined"这句契约对它们全部失效 —— 走下去
