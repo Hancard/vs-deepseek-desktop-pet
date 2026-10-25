@@ -82,7 +82,12 @@ def check_python(filepath: str) -> list:
 
 def check_c(filepath: str) -> list:
     """对 C/C++ 文件运行语法检查"""
-    ext = os.path.splitext(filepath)[1]
+    # ⚠️ 必须 lower()（0.3.44）：Windows 的文件名大小写不敏感，`Foo.CPP` /
+    # `bar.Cxx` 是合法且常见的写法。不 lower 时 is_cpp 恒为 False ——
+    # 于是 C++ 文件被交给 **gcc**（C 编译器）并标成 languageId 'c'，
+    # 合法的 C++ 语法（iostream / 类 / 模板）会被报成一堆假错误，
+    # 而调用方（第 179 行）是按 lower 后的扩展名分发到这里的，两边口径不一致。
+    ext = os.path.splitext(filepath)[1].lower()
     is_cpp = ext in ('.cpp', '.cxx', '.cc')
     compiler = 'g++' if is_cpp else 'gcc'
     language_id = 'cpp' if is_cpp else 'c'
