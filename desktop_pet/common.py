@@ -1159,6 +1159,11 @@ _MIME = {
     '.css': 'text/css; charset=utf-8',
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
+    # ⚠️ .jpeg 必须一起列（0.3.44）：find_character_image() 认这个后缀
+    # （assets/README.md 承诺的四种之一），_character_url 的 _CHAR_MIME 也认，
+    # 只有这张表没列 —— 于是 assets/character.jpeg 会被 /char/ 路由以
+    # application/octet-stream 发出去。同一个格式在两张表里出现，答案必须一致。
+    '.jpeg': 'image/jpeg',
     '.webp': 'image/webp',
     '.gif': 'image/gif',
     '.txt': 'text/plain; charset=utf-8',
