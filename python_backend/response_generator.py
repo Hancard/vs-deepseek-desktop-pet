@@ -340,7 +340,11 @@ def generate_response(context: dict) -> dict:
             # syntax_error），占位符就会说给用户听。
             variables = {"language": language, "line": "?"}
             if errors:
-                variables["line"] = errors[0].get("line", "?")
+                # ⚠️ 必须走 _nvl（0.3.44）：`dict.get(k, "?")` 只在**键不存在**
+                # 时给默认值，JSON 里 `"line": null` 会原样得到 None ——
+                # 气泡念出"第 None 行少了个括号…"。上面那条 file_scan 分支
+                # 早就改成 _nvl 了，这里是同一个坑的另一半。
+                variables["line"] = _nvl(errors[0].get("line"))
             text = pick_corpus(category, variables)
     else:
         text = pick_corpus(category)
