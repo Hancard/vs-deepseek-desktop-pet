@@ -168,6 +168,36 @@ def clamp_detect_sec(value):
     return max(DETECT_MIN_SEC, min(DETECT_MAX_SEC, n))
 
 
+def _as_int(value, default=0):
+    """把任意输入收敛成 int（0.3.44）。
+
+    ⚠️ 必须连 OverflowError 一起兜：Python 的 json 默认接受字面量 `1e999` /
+    `Infinity`，解析成 `float('inf')`，而 `int(inf)` 抛的是 **OverflowError** ——
+    它不是 TypeError/ValueError 的子类。只写那两个的 except 会漏过去，一路
+    穿到 `handle_error`（那里只吞连接类异常），客户端收到 **0 字节**、连接
+    直接断，日志里一行都没有（扩展以 stdio:'ignore' 起进程）。
+
+    这个坑本项目已经踩过三次（clamp_detect_sec、_as_seq、_corpus_open_ack），
+    `/push` 的 error_count 两处是第四、第五处。收敛到一个入口，别再各写各的。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _nvl(value, fallback='?'):
+    """把 JSON null / 空串换成占位符（0.3.44，与 response_generator._nvl 同义）。
+
+    ⚠️ 不能写 `value or fallback`：行号**真可以是 0**（watcher 那条链路会发 0），
+    `or` 会把合法值一起吃掉。而 `dict.get(k, default)` 只在**键不存在**时生效，
+    键存在但值是 null 时照样返回 None → 气泡里念出"第 None 行"。
+    """
+    if value is None or value == '':
+        return fallback
+    return value
+
+
 def _as_seq(value):
     """把任意输入收敛成非负整数序号（「编辑语料」请求的计次）。
 
@@ -1216,10 +1246,10 @@ class AiriHandler(BaseHTTPRequestHandler):
                 # items 传 null 会在这里炸出 None[:5] TypeError → 500 断连；
                 # count 传字符串会让 _builtin_reply 的 > 0 比较抛 TypeError。
                 # 诊断来源不止自家扩展一个，字段类型必须兜底。
-                try:
-                    error_count = int(p.get('count', 0) or 0)
-                except (TypeError, ValueError):
-                    error_count = 0
+                # ⚠️ 用 _as_int（0.3.44）：`int()` 只兜 TypeError/ValueError
+                # 时，`{"count": 1e999}` 解析成 inf → OverflowError 穿透 →
+                # 客户端收到 0 字节、日志零行（见 _as_int 的注释）。
+                error_count = _as_int(p.get('count'))
                 items = p.get('items')
                 ctx = {
                     'trigger': p.get('trigger', 'diagnostics'),
@@ -1238,10 +1268,8 @@ class AiriHandler(BaseHTTPRequestHandler):
                 if _backend_available:
                     _generate_async(msg, 'trigger')
                 else:
-                    try:
-                        _ec = int(msg.get('error_count', 0) or 0)
-                    except (TypeError, ValueError):
-                        _ec = 0
+                    # 同一个坑的第五处（0.3.44）：见 _as_int。
+                    _ec = _as_int(msg.get('error_count'))
                     _builtin_reply(_ec, msg.get('trigger', 'diagnostics'),
                                    msg.get('file'), msg.get('sample_errors'),
                                    str(msg.get('reason', 'changed') or 'changed'))
