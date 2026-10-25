@@ -1173,7 +1173,7 @@ _MIME = {
 }
 
 
-def _safe_join(base: Path, url_path: str):
+def _safe_join(base: Path, url_path: str, unquote: bool = True):
     """把 URL 路径安全映射到 base 之下；越界（含 `..`、绝对路径）返回 None。
 
     ⚠️ resolve() 遇到畸形路径抛的是 **ValueError**（内嵌 NUL）或 OSError，
@@ -1181,9 +1181,16 @@ def _safe_join(base: Path, url_path: str):
     `GET /vendor/%00` 就能让请求**直接断连**（客户端 RemoteDisconnected、
     宿主控制台吐一段 traceback）—— v0.3.31 实测。畸形路径必须与越界
     走同一条路（403），不能炸穿请求。
+
+    ⚠️ `unquote=False` 给"调用方已经解码过"的场景（0.3.44）。本函数再解一次
+    就是**双重解码**：`%252F` 第一层解码成字面量 `%2F`（不含斜杠，能通过调用
+    方的单层检查），到这里第二次解码才变回真斜杠 —— 于是
+    `/char/live2d%252fmodel%252fREADME.md` 能读到 assets/ 下任意层的文件，
+    把"只允许 assets 根目录下的单层文件名"整条控制绕过（实测 403 → 200）。
+    已经解码过的调用方必须传 False。
     """
     try:
-        rel = urllib.parse.unquote(url_path)
+        rel = urllib.parse.unquote(url_path) if unquote else url_path
         rel = rel.replace('\\', '/').lstrip('/')
         if not rel:
             return None
@@ -1239,8 +1246,12 @@ def _make_handler(html_text: str):
                 rel = urllib.parse.unquote(path[len(_CHAR_PREFIX):])
                 if (not rel or '/' in rel or '\\' in rel or rel in ('.', '..')):
                     return self._plain(403, b'forbidden path', body)
-                target = _safe_join(_CHAR_ROOT, rel)
+                target = _safe_join(_CHAR_ROOT, rel, unquote=False)
                 if target is None:
+                    return self._plain(403, b'forbidden path', body)
+                # 双保险（0.3.44）：编码花样不止 %2F 一种，最后按**结果**再判
+                # 一次 —— 只认 assets/ 根目录的直接子文件，子目录一律拒绝。
+                if target.parent != _CHAR_ROOT.resolve():
                     return self._plain(403, b'forbidden path', body)
                 if not target.is_file():
                     return self._plain(
