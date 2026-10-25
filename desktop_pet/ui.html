@@ -1275,6 +1275,12 @@
     var sseInstance = null;
     var sseRetryTimer = null;
     var sseRetryDelay = 1000;
+    // 已收到的最大事件 id（0.3.44）。浏览器**自动**重连会替我们带
+    // Last-Event-ID，但下面那条手动重建路径是 `new EventSource(...)`，
+    // 全新对象没有这个状态 —— 服务端于是按"全新连接"处理，把最近 20 条
+    // 重播一遍，桌宠把说过的话再念一次。所以自己记住 id，重建时挂到
+    // 查询串上（服务端 /events 认 ?after_seq=）。
+    var lastSSESeq = 0;
 
     function scheduleSSERetry() {
       if (sseRetryTimer) return;                 // 已经在等了，别叠定时器
@@ -1287,7 +1293,12 @@
     }
 
     function connectSSE() {
-      var es = new EventSource(SSE_URL);
+      // 续传点：首次连接（lastSSESeq=0）不带参数，服务端重播最近几条；
+      // 手动重建时带上已知的最大 id，只补缺口。
+      var url = lastSSESeq > 0
+        ? (SSE_URL + '?after_seq=' + lastSSESeq)
+        : SSE_URL;
+      var es = new EventSource(url);
       sseInstance = es;
       es.onopen = function() {
         setOnline(true);
@@ -1295,6 +1306,9 @@
         fetch(EVENT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'desktopReady' }) }).catch(function() {});
       };
       es.onmessage = function(event) {
+        // id 由服务端写在 `id:` 行里；空串/非数字时保持原值
+        var eid = Number(event && event.lastEventId);
+        if (isFinite(eid) && eid > lastSSESeq) { lastSSESeq = eid; }
         try {
           var msg = JSON.parse(event.data);
           if (!msg || !msg.type) return;
