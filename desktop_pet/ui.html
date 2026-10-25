@@ -2085,11 +2085,13 @@
     var settingsSeq = 0;
     var detectPostTimer = null;
     var pendingDetectSec = null;
-    // 一次连点 burst 的**起点**值（0.3.43）。见 setDetectSec：prev 不能每次
-    // 点击各记一个 —— clearTimeout 会把前几次的闭包连同它的 prev 一起丢掉，
-    // 只有最后一个活到 POST，于是失败回滚到的是"连点过程中的某个中间值"，
-    // 而那个值**从来没落过盘**，界面上显示的值和磁盘上的值都不是它。
-    var burstPrev = null;
+    // 上一次**确认落盘**的周期值 = 失败回滚的基准（0.3.44）。
+    // 以前用"一次连点 burst 的起点"当基准（burstPrev），可只要用户停 >150ms
+    // 再点，pendingDetectSec 已被清空 → 新 burst 记的"起点"是**没落盘的
+    // 乐观值**（31），而磁盘上其实还是 30。回滚到 31 之后：界面 31、磁盘 30、
+    // 气泡说"没保存成功" —— 三个值互不相同。改成盯"最后一次服务端确认的值"，
+    // 无论中间连点多少下、间隔多久，回滚目标永远是磁盘上真实生效的那个。
+    var diskDetectSec = detectSec;
 
     function detectFailed(prev, seq) {
       if (seq !== settingsSeq) return;   // 已经有更新的操作了，别抢它的结果
@@ -2116,6 +2118,9 @@
           // 不看这个字段 → 界面显示成功，桌宠行为纹丝不动，下次右键打开
           // 菜单又被 syncDetectSec 弹回旧值，用户以为"设置自己跳回去了"。
           if (d.saved === false) { detectFailed(prev, seq); return; }
+          // 落盘成功 → 这个值成为新的回滚基准（以服务端夹过的值为准）
+          diskDetectSec = isFinite(d.detectIntervalSec)
+            ? clampDetect(d.detectIntervalSec) : sec;
           // 服务端才是权威（它夹过值）：不一致就对齐回来，别让界面说谎
           if (isFinite(d.detectIntervalSec)) {
             var v = clampDetect(d.detectIntervalSec);
@@ -2128,11 +2133,14 @@
     function setDetectSec(sec) {
       var next = clampDetect(sec);
       if (next === detectSec) return;
-      // ⚠️ 只在 burst **起点**记一次 prev（0.3.43）。见 burstPrev 的注释：
-      // 连点 5 下时闭包里的 prev 依次是 30/31/32/33/34，只有最后一个的
-      // timer 活下来，POST 失败就回滚到 34 —— 可磁盘上真正生效的是 30，
-      // 界面停在 34，用户看到的"没保存成功"和显示的值互相矛盾。
-      if (pendingDetectSec === null) burstPrev = detectSec;
+      // ⚠️ 一有新的点击就作废所有在途响应（0.3.44）。序号以前只在
+      // postDetectSec 里自增，而那里离真正发请求还隔着一个 150ms 防抖：
+      //   · 上个 burst 的 POST 在这 150ms 内失败 → detectFailed 的
+      //     `seq !== settingsSeq` 拦不住（序号还没变）→ 界面被回滚到旧值、
+      //     还冒一条"周期没保存成功"，可新一轮其实存成功了（数字先跳一下再回来）；
+      //   · 菜单打开时的 GET 同样在这 150ms 内返回 → 把刚点的乐观值打回旧值。
+      // 在**变更发生的第一时间**自增，两条在途响应就都过期了。
+      settingsSeq++;
       detectSec = next;
       renderDetectLabels();
       repushMenuRegion();      // 「1 秒」比「30 秒」窄，面板宽度变了就要重推 region
@@ -2144,13 +2152,10 @@
       detectPostTimer = setTimeout(function() {
         detectPostTimer = null;
         var target = pendingDetectSec;
-        var base = burstPrev;
         pendingDetectSec = null;
-        burstPrev = null;
         if (target === null) return;
-        // base 理论上不会是 null（pendingDetectSec === null 时刚设过）；
-        // 万一真拿到 null，宁可不回滚也不要写成 detectSec = null
-        postDetectSec(target, base === null ? target : base);
+        // 回滚基准永远是"最后确认落盘"的值，不传 null 也不传乐观值
+        postDetectSec(target, diskDetectSec);
       }, 150);
     }
 
@@ -2165,6 +2170,7 @@
           if (isFinite(d.max)) detectMax = d.max;
           if (!isFinite(d.detectIntervalSec)) return;
           var v = clampDetect(d.detectIntervalSec);
+          diskDetectSec = v;          // 服务端读到的就是磁盘上的值 → 回滚基准
           if (v !== detectSec) { detectSec = v; repushMenuRegion(); }
           renderDetectLabels();
         }).catch(function() {});
