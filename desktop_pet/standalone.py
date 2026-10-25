@@ -731,7 +731,8 @@ def _pick_click_line(zone):
     _last_pick[zone] = idx
     return pool[idx]
 
-def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reason='changed'):
+def _builtin_reply(error_count, trigger='diagnostics', file='', items=None,
+                   reason='changed', _push=None):
     """后端（response_generator）不可用时的内置兜底台词。
 
     diagnostics 与 trigger/all_clear 两条推送分支共用 —— 后者此前漏了兜底，
@@ -740,7 +741,12 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reas
     file_scan（当前文件 bug 播报）同样要有兜底：无后端时也能说出
     文件名、数量和前几条 bug 的行号内容。reason='remind' 表示 bug 数量
     没变化的周期提醒，换一套说法避免与首播复读同一句。
+
+    @param _push 播报出口，默认就是 push_message。`_generate_async` 传自己的
+                 `_emit` 进来，好让兜底台词和成功结果**共用**同一道
+                 "过期作废"闸门（0.3.44）—— 否则兜底会绕过它。
     """
+    emit = _push or push_message
     if trigger == 'file_scan':
         fname = file or '当前文件'
         if error_count > 0:
@@ -749,8 +755,11 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reas
                 parts = []
                 for it in items[:3]:
                     if isinstance(it, dict):
+                        # ⚠️ line 可能是 JSON null（0.3.44）：dict.get 的默认值
+                        # 只在"键不存在"时生效，null 会原样拼成"第 None 行"。
                         parts.append('第%s行：%s' % (
-                            it.get('line', '?'), str(it.get('message', ''))[:40]))
+                            _nvl(it.get('line')),
+                            str(it.get('message', ''))[:40]))
                 detail = '；'.join(parts)
             if reason == 'remind':
                 text = '%s 里那 %d 个 bug 还在呢，我可都记着账的。%s' % (
@@ -758,16 +767,16 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None, reas
             else:
                 text = '%s 里还躺着 %d 个 bug，别装没看见！%s' % (
                     fname, error_count, (' ' + detail) if detail else '')
-            push_message('errorAlert', text, 'angry')
+            emit('errorAlert', text, 'angry')
         else:
-            push_message('chatMessage',
-                         '%s 干净了，零 bug。哼，勉强表扬你一下。' % fname,
-                         'happy')
+            emit('chatMessage',
+                 '%s 干净了，零 bug。哼，勉强表扬你一下。' % fname,
+                 'happy')
         return
     if error_count > 0:
-        push_message('errorAlert', f"喂！{error_count} 个错误！给我认真点检查！", 'angry')
+        emit('errorAlert', f"喂！{error_count} 个错误！给我认真点检查！", 'angry')
     else:
-        push_message('chatMessage', '哼，全部修好了…算你厉害。', 'happy')
+        emit('chatMessage', '哼，全部修好了…算你厉害。', 'happy')
 
 
 # ---------------------------------------------------------------------------
@@ -858,6 +867,32 @@ def _generate_async(ctx, tag):
         my_seq = _gen_seq
         _gen_inflight.add(sig)
 
+    def _emit(mtype, text, emotion='idle'):
+        """唯一的播报出口：成功结果与兜底台词**共用**这道"过期作废"闸门。
+
+        ⚠️ 0.3.44 之前只有成功路径检查 `my_seq < _gen_done_seq`，而兜底是
+        直接 `_builtin_reply` → `push_message` 说话的：既不作废过期结果，
+        也不推进 `_gen_done_seq`。后端一次超时/异常就能让桌宠自己推翻自己：
+
+            file_scan（seq=1，随后生成失败）→ all_clear（seq=2，说"干净了"）
+            → seq=1 的兜底迟到，播出"还有 3 个 bug"，
+            而内部 `_gen_done_seq` 仍认为最新的是"干净了"。
+
+        反向也成立：兜底不推进序号，本该被判过期的**旧成功结果**会被照常
+        播出（`my_seq < _gen_done_seq` 恒假）。两条都实测过。
+        """
+        global _gen_done_seq
+        with _gen_lock:
+            if my_seq < _gen_done_seq:
+                log('[airi-standalone] %s stale result dropped (seq=%d < %d)'
+                    % (tag, my_seq, _gen_done_seq))
+                return
+            _gen_done_seq = my_seq
+        try:
+            push_message(mtype, text, emotion)
+        except Exception as exc:
+            log('[airi-standalone] %s push failed: %r' % (tag, exc))
+
     def _fallback(exc=None):
         """生成拿不到结果时的兜底：宁可说一句内置台词，也不能什么都不说。
 
@@ -869,19 +904,17 @@ def _generate_async(ctx, tag):
         else:
             log('[airi-standalone] %s generated nothing -> fallback' % tag)
         try:
-            ec = ctx.get('error_count', 0)
-            try:
-                ec = int(ec or 0)
-            except (TypeError, ValueError):
-                ec = 0
-            _builtin_reply(ec, str(ctx.get('trigger', 'diagnostics') or 'diagnostics'),
+            # ⚠️ _push=_emit（0.3.44）：兜底也必须过"过期作废"这道闸门；
+            # error_count 用 _as_int，`int()` 的旧写法漏 OverflowError。
+            _builtin_reply(_as_int(ctx.get('error_count')),
+                           str(ctx.get('trigger', 'diagnostics') or 'diagnostics'),
                            ctx.get('file') or '', ctx.get('sample_errors'),
-                           str(ctx.get('reason', 'changed') or 'changed'))
+                           str(ctx.get('reason', 'changed') or 'changed'),
+                           _push=_emit)
         except Exception as fb_exc:
             log('[airi-standalone] %s fallback failed: %r' % (tag, fb_exc))
 
     def _run():
-        global _gen_done_seq
         try:
             try:
                 r = generate_response(ctx)
@@ -911,18 +944,8 @@ def _generate_async(ctx, tag):
             with _gen_lock:
                 _gen_inflight.discard(sig)
 
-        with _gen_lock:
-            # 已经有更新的生成播报过 → 这条是过期的，丢掉（否则桌宠会
-            # 先说"干净了"再改口"还有 3 个 bug"）
-            if my_seq < _gen_done_seq:
-                log('[airi-standalone] %s stale result dropped (seq=%d < %d)'
-                    % (tag, my_seq, _gen_done_seq))
-                return
-            _gen_done_seq = my_seq
-        try:
-            push_message(mtype, text, emotion)
-        except Exception as exc:
-            log('[airi-standalone] %s push failed: %r' % (tag, exc))
+        # 过期作废 + 播报，全在 _emit 里（与兜底同一条路）
+        _emit(mtype, text, emotion)
 
     threading.Thread(target=_run, daemon=True,
                      name='airi-gen-%s-%d' % (tag, my_seq)).start()
