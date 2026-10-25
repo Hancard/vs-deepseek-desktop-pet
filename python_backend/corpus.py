@@ -314,6 +314,24 @@ ALLOWED_PLACEHOLDERS = {
 
 _PLACEHOLDER_RE = re.compile(r'\{(\w+)\}')
 
+#: 允许花括号内侧带空白的写法（0.3.44）。内置台词本身就是「第 {line} 行」
+#: 这种排版，用户照着写成 `{ line }` 太自然了 —— 而校验用 `\{(\w+)\}` 匹配
+#: 不到它（当成"没有占位符"放行），response_generator 的 `str.replace("{line}")`
+#: 也匹配不到（原样念进气泡）。两处口径都对，只是中间夹了空格。
+_PLACEHOLDER_LOOSE_RE = re.compile(r'\{\s*(\w+)\s*\}')
+
+
+def _norm_placeholders(text):
+    """把 `{ line }` / `{line }` 收敛成 `{line}`（0.3.44）。
+
+    在**读入时**统一一次，后面校验与替换就都只有一种形态 —— 比在
+    response_generator 里再写一遍带空格的替换安全（那里是热路径，且
+    占位符缺失时还要保持"原样残留"的可见性）。
+    """
+    if '{' not in text:
+        return text
+    return _PLACEHOLDER_LOOSE_RE.sub(r'{\1}', text)
+
 
 def get_all_scenes():
     """返回所有场景名称列表（保持原签名：外部与测试都在用）"""
@@ -484,7 +502,7 @@ def _clean_scene_lines(scene, value):
         if not isinstance(item, str):
             dropped += 1
             continue
-        text = item.strip()
+        text = _norm_placeholders(item.strip())
         if not text:
             dropped += 1
             continue
@@ -508,7 +526,7 @@ def _clean_click_pool(zone, value):
                 or not item[0].strip() or item[1] not in CLICK_EMOTIONS):
             dropped += 1
             continue
-        kept.append((item[0].strip(), item[1]))
+        kept.append((_norm_placeholders(item[0].strip()), item[1]))
     return (kept or None), dropped
 
 
