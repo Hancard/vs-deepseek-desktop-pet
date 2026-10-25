@@ -1,5 +1,111 @@
 # Change Log
 
+## [0.3.44] — 2026-10-25
+
+### Fixed
+
+- **`/char/` 的"只允许单层文件名"能用 `%252F` 双重编码绕过**（`common.py`）
+  路由先 `unquote` 一次用于判断"有没有斜杠"，随后 `_safe_join()` 对同一个字符串
+  **又解码一次**：`%252F` 第一层解码成字面量 `%2F`（不含斜杠，通过检查），第二次
+  解码才变回真斜杠。实测 `GET /char/live2d%252fvendor%252fLICENSE-...txt` →
+  **200 + 真实文件内容**（该路由的注释承诺"带子路径的一律 403、不把整个 assets/
+  递归暴露"）。修：`_safe_join(..., unquote=False)` 让"已经解码过"的调用方不再
+  被解第二次；再加一道按**结果**的判定（`target.parent` 必须是 assets 根），
+  因为编码花样不止 `%2F` 一种。
+- **`.jpeg` 立绘以 `application/octet-stream` 发出去**（`common.py`）
+  `find_character_image()` 认 `.jpeg`（README 承诺的四种之一），`_CHAR_MIME` 也认，
+  只有响应头用的 `_MIME` 没列 —— 同一个格式在两张表里两个答案。补上，并在测试里
+  断言"五种立绘后缀在两张表里答案一致"。
+- **`/push` 收到 `count: 1e999` 时直接断连、日志零行**（`standalone.py`）
+  JSON 的 `1e999` / `Infinity` 解析成 `float('inf')`，`int(inf)` 抛 **`OverflowError`**
+  —— 它**不是** TypeError/ValueError 的子类，只写那两个的 `except` 漏过去，一路穿到
+  `handle_error`（只吞连接类异常）。实测客户端收到 **0 字节**、`RemoteDisconnected`，
+  而 `.airi-pet.log` 里一行都没有（扩展以 `stdio:'ignore'` 起进程）。这个坑本项目
+  已经踩过三次（`clamp_detect_sec` / `_as_seq` / `_corpus_open_ack`），`/push` 的
+  `count`、`error_count` 与兜底里的 `ec` 是第四、五、六处。修：新增 `_as_int()`
+  统一兜 `(TypeError, ValueError, OverflowError)`，三处都改走它。
+- **兜底台词绕过"过期作废"闸门，桌宠会自己推翻自己**（`standalone.py`）
+  只有成功路径检查 `my_seq < _gen_done_seq`，而兜底是直接 `_builtin_reply` →
+  `push_message` 说话的：既不作废过期结果，也不推进 `_gen_done_seq`。后端一次超时/
+  异常就够触发 —— `file_scan`（seq=1，随后失败）→ `all_clear`（seq=2，说"干净了"）
+  → seq=1 的兜底迟到，播出"还有 3 个 bug"，而内部仍认为最新的是"干净了"。反向也
+  成立：兜底不推进序号，本该作废的**旧成功结果**会被照常播出。修：抽出 `_emit()`，
+  成功结果与兜底共用同一道闸门（`_builtin_reply` 增加 `_push` 参数）。
+- **「编辑语料」的序号被写小，功能长期失效**（`standalone.py`）
+  `seq = _as_seq(settings['openCorpusSeq']) + 1` 用的是**启动快照**，而 `_persist_locked`
+  写盘前会与磁盘合并 —— 合并不保护"正在写的这个键"，于是磁盘上是 100、内存是 0 时
+  算出 1 并写进磁盘：序号倒退，扩展那边 `seq <= last` 从此一律不接单（要一路点到
+  101 才恢复），且被写小的旧值不可恢复；每次点击都要等满 2.5s 再回落 `code` 命令，
+  在 VS Code 已开着时再拉一个窗口。实测响应 `{"openCorpusSeq": 1}`、磁盘 `100 → 1`。
+  修：取**内存与磁盘的较大值** + 1。
+- **单条消息没有统一上限**（`standalone.py`）
+  0.3.43 只把"解析失败"和"非对象"两条分支统一截到 500，但 `payload.text` 分支、
+  `message` 默认值分支（默认值就是整个 body）、以及 LLM 生成的结果都没截。body 上限
+  1MB、队列上限 200 → 最坏 ~200MB 常驻，每个 SSE 连接每次都要写 1MB。修：截断放进
+  `push_message()` 这个**唯一出口**（`MAX_PUSH_CHARS = 4000`），以后新增调用方不用
+  再记得这件事。
+- **手动重建的 EventSource 不带续传点，断线恢复后把最近 20 条重播一遍**（`standalone.py` + `ui.html`）
+  浏览器**自动**重连会替我们带 `Last-Event-ID`，但服务端回了非 `text/event-stream`
+  导致 CLOSED 时，前端会自己 `new EventSource(url)` 重建 —— 全新对象没有这个状态，
+  服务端按"全新连接"处理，`replay = sse_queue[-20:]` 全弹一遍（桌宠把说过的话再念
+  一次，20 条按打字机滚很久）。修：前端记住 `event.lastEventId` 并在重建时挂
+  `?after_seq=N`，服务端在头之外也认这个查询参数。
+- **语料读一次失败就永远不重试（改了台词不生效）**（`corpus.py`）
+  0.3.38 只修了一半：读坏时保住了 last-known-good，却仍然 `_cache.update(key=key)`。
+  凡是"stat 成功、open 失败"的情形（OneDrive 仅联机占位 / 杀软短暂锁文件 / 编辑器
+  保存窗口），文件的 `(mtime, size)` 已经是新的、不会再变 —— 这个键被记进缓存后，
+  之后每次调用都命中，**本次运行内再也不会生效**。修：失败一律不推进 key（下一拍就
+  重试），日志按错误内容去重（新增 `err_logged`），不刷屏。
+- **占位符写成 `{ file }`（带空格）既不校验也不替换，原样念进气泡**（`corpus.py`）
+  校验用 `\{(\w+)\}`、替换用 `str.replace("{file}")`，两处都要求紧贴，于是
+  `喂，{ file } 里有 3 个 bug` 会被判成"没有占位符"放行，然后原样出现在气泡里 ——
+  与语料文件头"免得气泡里冒出 `{xxx}`"的承诺相反。内置台词本身就是「第 {line} 行」
+  这种排版，用户照着写带空格的说法太自然了。修：读入时统一归一（`_norm_placeholders`），
+  下游校验与替换就只剩一种形态。
+- **`line: null` 被念成"第 None 行"**（`response_generator.py`）
+  `errors[0].get("line", "?")` 的默认值只在**键不存在**时生效，JSON 里 `"line": null`
+  会原样得到 `None`。同一条链路里 file_scan 分支早就改成 `_nvl(...)` 了，diagnostics
+  这半边漏了（0.3.40 修过同一个坑的另一次）。
+- **设置文件被整份覆盖后，「编辑语料」要连点 12 次才恢复**（`extension.ts`）
+  判据是 `seq <= lastCorpusOpenSeq`。README 教的改周期写法是
+  `'{"detectIntervalSec": 5}' | Set-Content ...` —— **整份覆盖**会把 `openCorpusSeq`
+  字段一起抹掉，桌宠重启后从 0 起算、下次点击写 1；而扩展内存里还是旧值（比如 12），
+  于是 1..12 全被判成"已处理"：既不打开、也**不回执** → 桌宠等满 2.5s 后回落 `code`，
+  在已开着的 VS Code 之外再拉一个窗口。修：判据改成"和上一次**相同**才忽略" ——
+  这里读的本来就是文件当前值（不是事件里夹带的旧值），序号变小只可能来自文件被重置；
+  真正要防的重放是"同一次请求被 watchFile 触发两遍"，那两条的 seq 必然相等。
+- **`"detectIntervalSec": true` 把周期打成 1 秒**（`extension.ts`）
+  `Number(true) === 1`，而过滤器只挡 `!isFinite || <= 0` —— 合法 JSON 里写个 `true`
+  就把 30 秒变成 1 秒（每拍推一次、后端每拍起一个生成线程），且违反"字段非法保持
+  当前值"的契约。`Number(["45"]) === 45` 同理。修：只接受 number 与数字字符串，
+  其它一律 `NaN` → 保持当前值，与 Python 侧 `clamp_detect_sec` 口径一致。
+- **打字机把 emoji 切成半个代理对，每个 emoji 闪一帧「�」**（`ui.html`）
+  `text.charAt(i++)` 走的是 UTF-16 **码元**：先追加高位代理、下一帧才补低位，中间
+  那一帧就是孤立代理。0.3.43 只修了 `clipBubbleText`（存储侧），打字这半边没跟上。
+  修：一次吞掉整个码点。
+- **连点「+」时旧请求的失败会抢跑、菜单的 GET 会把乐观值打回旧值**（`ui.html`）
+  序号只在 `postDetectSec` 里自增，而那里离真正发请求还隔着一个 150ms 防抖：
+  ① 上一个 burst 的 POST 在这 150ms 内失败 → `detectFailed` 的 `seq !== settingsSeq`
+  拦不住（序号还没变）→ 界面被回滚、还冒一条"周期没保存成功"，可新一轮其实存成功了
+  （数字先跳一下再回来）；② 打开菜单时的 GET 同样在这 150ms 内返回 → 把刚点下去的
+  值打回旧值（5 → 30 → 5）。修：变更发生的第一时间就自增 `settingsSeq`。
+- **失败回滚落在一个"从没落过盘"的值上**（`ui.html`）
+  0.3.43 用"一次连点 burst 的起点"当基准；可只要用户停 >150ms 再点，
+  `pendingDetectSec` 已经清空，新 burst 记的"起点"是**乐观值**（31），而磁盘上其实
+  还是 30 —— 回滚后界面 31、磁盘 30、气泡还说"没保存成功"，三个值互不相同。
+  修：基准改成 `diskDetectSec`（最后一次服务端确认落盘的值），无论中间连点多少下、
+  间隔多久，回滚目标永远是磁盘上真实生效的那个。
+- **「编辑语料」的在途守卫只活了一个 RTT，盖不住它要防的 180ms 窗口**（`ui.html`）
+  0.3.43 在 `fetch` 的 `.then/.catch` 里把标志置回 false，可那个 POST 在 Python 侧是
+  "登记 slot → 落盘 → 起线程 → 立刻 200"，本机 RTT 只有 10~20ms —— 比菜单
+  `transition: visibility 0.18s` 的过渡窗口还短，双击的第二下照样打进来：两个 worker、
+  扩展只回执最大的 seq、先发那个 2.5s 后回落 → 同一个语料文件被两个程序各打开一次。
+  修：固定按住 700ms（> Windows 双击间隔上限，< 后端 2.5s 回执超时），回调不再碰标志。
+- **`Foo.CPP` 被交给 gcc、languageId 记成 c**（`watcher.py`）
+  `check_c()` 取后缀没 `lower()`，Windows 上 `.CPP` / `.Cxx` 是合法且常见的写法 ——
+  `is_cpp` 恒为 False，C++ 文件被 C 编译器检查（iostream / 类 / 模板全报假错误），
+  而调用方是按 lower 后的扩展名分发到这里的，两边口径不一致。修：`lower()`。
+
 ## [0.3.43] — 2026-10-24
 
 ### Fixed
