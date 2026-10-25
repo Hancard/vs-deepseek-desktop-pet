@@ -463,7 +463,10 @@ def _log(msg):
 
 
 #: 缓存：(mtime_ns, size) → 解析结果。用户改完保存，键一变立刻重读。
-_cache = {'key': None, 'scenes': {}, 'clicks': {}, 'error': None, 'dropped': 0}
+#: `err_logged` 只用来给"读失败"的日志去重（0.3.44）—— 失败时不再推进 key，
+#: 于是每一拍都会重读，日志不能跟着每一拍刷一遍。
+_cache = {'key': None, 'scenes': {}, 'clicks': {}, 'error': None, 'dropped': 0,
+          'err_logged': None}
 _cache_lock = threading.Lock()
 _ABSENT = ('__absent__', 0)
 
@@ -570,7 +573,7 @@ def _user_corpus():
             return _cache['scenes'], _cache['clicks'], _cache['error']
     scenes, clicks, dropped, error = _read_corpus_file(key)
     with _cache_lock:
-        if error and (_cache['scenes'] or _cache['clicks']):
+        if error:
             # ⚠️ 读坏了**不能把上一版好语料抹掉**（0.3.38）。
             #
             # 原来这里是无条件 _cache.update(scenes={}, clicks={})：
@@ -578,23 +581,39 @@ def _user_corpus():
             # 可能正好落在中间，读到 0 字节；或者语料在网盘/OneDrive 目录下
             # 处于仅联机占位状态，open() 干脆失败。这两种情况下旧语料本来
             # 是完好的，却被清成空 —— 用户看到的是"我写的台词全都不认了"。
-            # 更糟的是 key 会被设成这次失败的 (mtime, size)，只要它不再变就
-            # 永远不重试：语料就这么一直停在内置，直到用户再去动那个文件。
             #
-            # 保留 last-known-good，只更新 key 与 error：留痕照旧，功能不退。
-            # 注意 scenes/clicks 也要换回旧值 —— 否则缓存里留着好的、
-            # 返回的却是这次读坏的 {}，调用方照样回落内置，等于白保留。
-            _cache.update(key=key, error=error)
-            scenes, clicks = _cache['scenes'], _cache['clicks']
-            _log('[airi-corpus] keep last good corpus (read failed): %s'
-                 % error)
+            # ⚠️ 而且**不能推进 key**（0.3.44）：0.3.38 只修了一半 ——
+            # 保住了 last-known-good，却仍然 `key=key`。凡是"stat 成功、open
+            # 失败"的情形（OneDrive 仅联机占位 / 杀软短暂锁文件 / 编辑器保存
+            # 窗口），文件的 (mtime, size) 已经是新的、不会再变 —— 于是这个
+            # 键被记进缓存，之后每一次调用都命中缓存、永远不重试：用户解锁
+            # 文件、把语料改好，本次运行内**再也不会生效**（只有"截断成 0
+            # 字节再写"那条能自愈，因为 size 又变了）。现在失败一律不推进
+            # key，下一拍就重试，日志按错误内容去重（见 err_logged）。
+            prev_err = _cache['err_logged']
+            _cache.update(error=error)
+            kept_prev = False
+            if _cache['scenes'] or _cache['clicks']:
+                # 缓存里留着好的、返回的却是这次读坏的 {}，等于白保留
+                scenes, clicks = _cache['scenes'], _cache['clicks']
+                kept_prev = True
+            else:
+                scenes, clicks = {}, {}
+            # 只在**错误内容变化**时留痕：失败不再推进 key、每一拍都会重读，
+            # 无条件 log 会变成每 30 秒刷一行（get_lines 还会更频繁）。
+            log_it = error != prev_err
+            _cache['err_logged'] = error
         else:
+            kept_prev = False
+            log_it = False
             _cache.update(key=key, scenes=scenes, clicks=clicks,
-                          error=error, dropped=dropped)
+                          error=error, dropped=dropped, err_logged=None)
     if error:
-        # 文件坏了要留痕：否则用户"改了没生效"时完全无从下手
-        _log('[airi-corpus] user corpus unreadable (%s) -> built-in lines: %s'
-             % (CORPUS_PATH, error))
+        if log_it:
+            _log('[airi-corpus] %s (%s): %s'
+                 % ('keep last good corpus' if kept_prev
+                    else 'user corpus unreadable -> built-in lines',
+                    CORPUS_PATH, error))
     elif scenes or clicks:
         _log('[airi-corpus] user corpus loaded: %d/%d scenes, %d/%d click pools,'
              ' %d line(s) dropped'
