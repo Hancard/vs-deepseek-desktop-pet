@@ -1390,7 +1390,14 @@ class AiriHandler(BaseHTTPRequestHandler):
                 #    （VS Code 里两个标签页/两个窗口）。登记必须早于发布。
                 slot = {'event': threading.Event(), 'ok': False, 'method': None}
                 with settings_lock:
-                    seq = _as_seq(settings.get('openCorpusSeq')) + 1
+                    # ⚠️ 取**内存与磁盘的较大值**（0.3.44）。settings 只是启动
+                    # 时的一份快照，而这个文件明确支持用户手改（也包含"从备份/
+                    # 另一台机器恢复 ~/.dsh/pets"）：磁盘上的序号可能比内存大。
+                    # 只看内存会算出一个**更小**的序号，_persist_locked 再把它
+                    # 写进磁盘 —— 序号倒退，扩展那边 `seq <= last` 从此一律
+                    # 不接单（要一路点到旧值之上才恢复），而且被写小的值不可恢复。
+                    seq = max(_as_seq(settings.get('openCorpusSeq')),
+                              _as_seq(load_settings().get('openCorpusSeq'))) + 1
                     with _corpus_open_lock:
                         _corpus_open_wait[seq] = slot
                     # 落盘失败同样要回滚（0.3.43），理由见 _persist_locked：
