@@ -19,7 +19,7 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 from common import (get_screen_size, get_dpi_scale, WindowAPI, find_character_image,
                     load_html, start_asset_server, disable_window_backdrop,
@@ -1156,7 +1156,7 @@ class AiriHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._cors_guard():
             return
-        if self.path == '/events':
+        if self.path == '/events' or self.path.startswith('/events?'):
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
@@ -1168,10 +1168,27 @@ class AiriHandler(BaseHTTPRequestHandler):
             # 此前每条事件不带 id，重连后整批重播最近 SSE_REPLAY_COUNT(20) 条 ——
             # 一次网络抖动，桌宠就把旧对话当新气泡全弹一遍（复读机）。
             # 现在每条事件带 id: <seq>，重连只补发缺口；全新连接（无该头）维持原重播行为。
+            #
+            # ⚠️ 头之外还要认 `?after_seq=`（0.3.44）。前端有一条**手动重建**
+            # EventSource 的路径（服务端回了非 text/event-stream 导致 CLOSED 时
+            # 自己带退避重连），而 `new EventSource(url)` 是全新对象，浏览器
+            # 不会替它带 Last-Event-ID —— 于是 header 为空、走"全新连接"分支、
+            # 把最近 20 条全部重播，桌宠把说过的话再念一遍。前端现在把已知的
+            # 最大 id 挂在查询串上，这里优先认头、没有再认查询串。
+            after_seq = 0
             try:
                 after_seq = int(self.headers.get('Last-Event-ID') or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 after_seq = 0
+            if after_seq <= 0:
+                try:
+                    # ⚠️ 用已导入的 urlsplit/parse_qs：这里写 `urllib.parse.xxx`
+                    # 会 NameError，而它不属下面那几个 except —— 异常会一路穿到
+                    # 外层 SSE 的 except，把**每一条**连接都判成写失败。
+                    q = parse_qs(urlsplit(self.path).query)
+                    after_seq = int((q.get('after_seq') or ['0'])[0] or 0)
+                except (TypeError, ValueError, OverflowError, IndexError):
+                    after_seq = 0
             # ⚠️ 必须把上界钳到当前 _seq，否则这条连接会被**永久饿死**：
             # _seq 是进程级单调计数且**重启归零**，客户端带一个比当前 _seq
             # 更大的 id 时，下面的 replay 必然为空，而 last_seq 就停在那个
