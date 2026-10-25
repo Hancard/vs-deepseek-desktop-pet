@@ -297,7 +297,20 @@ function readCorpusOpenSeq(): unknown {
  */
 async function openCorpusIfRequested(): Promise<boolean> {
 	const seq = Number(readCorpusOpenSeq());
-	if (!Number.isFinite(seq) || seq <= lastCorpusOpenSeq) { return false; }
+	if (!Number.isFinite(seq) || seq <= 0) { return false; }
+	// ⚠️ 判据只能是"和上一次**相同**才忽略"，不能是 `seq <= lastCorpusOpenSeq`
+	// （0.3.44）。设置文件是"用户可整份覆盖"的（README 教的改周期写法就是
+	// `'{"detectIntervalSec": 5}' | Set-Content ...`），整份覆盖会把
+	// openCorpusSeq 字段一起抹掉 —— 桌宠重启后从 0 起算，下一次点击写 1。
+	// 而扩展内存里的 lastCorpusOpenSeq 还是旧值（比如 12），于是 seq=1..12
+	// 全被判成"已处理"：既不打开、也**不回执** → 桌宠等满 2.5s 后回落
+	// `code` 命令，在 VS Code 已经开着的时候再拉一个窗口，正是三级回落要
+	// 避免的观感；用户得连点 12 次才恢复。
+	//
+	// 序号在正常运行中只增不减，而这里读的是**文件当前值**（不是事件里
+	// 夹带的旧值）：所以"变小"只可能来自文件被重置/替换。真正要防的重放是
+	// "同一次请求被 watchFile 触发两遍"，那两条的 seq 必然相等。
+	if (seq === lastCorpusOpenSeq) { return false; }
 	lastCorpusOpenSeq = seq;
 
 	let ok = false;
