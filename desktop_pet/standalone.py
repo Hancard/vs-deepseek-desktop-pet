@@ -654,9 +654,28 @@ def _sse_write_failed(exc, where):
     log(f'[airi-sse] {where} failed: {exc!r}')
 
 
+#: 单条气泡文本的上限（0.3.44）。只防"一条消息撑爆一帧"，不负责观感 ——
+#: 气泡显示多少由前端 clipBubbleText 决定（200 字）。这里给 4000，是因为
+#: LLM 偶尔返回长段解释，前端会自己裁；真正要挡住的是 1MB 级的原始 body。
+MAX_PUSH_CHARS = 4000
+
+
 def push_message(msg_type: str, text: str, emotion: str = "idle"):
-    """向 SSE 客户端推送消息。超过上限时丢弃最旧的消息。"""
+    """向 SSE 客户端推送消息。超过上限时丢弃最旧的消息。
+
+    ⚠️ 文本在这里**统一**截断（0.3.44）。以前是"哪个分支想起来了就在哪儿截"：
+    `/push` 的解析失败分支和非对象分支截到 500，而 `payload.text` 分支、
+    `message` 默认值分支、以及 LLM 生成的结果**都没截**。body 的上限是
+    MAX_BODY_BYTES=1MB，队列上限 MAX_QUEUE_SIZE=200 —— 最坏 ~200MB 常驻，
+    而且每个 SSE 连接每次都要写 1MB（慢客户端上 wfile.write 会阻塞）。
+    放在这个唯一出口上，之后新增调用方不用再记得这件事。
+    """
     global _seq
+    try:
+        if isinstance(text, str) and len(text) > MAX_PUSH_CHARS:
+            text = text[:MAX_PUSH_CHARS] + '…（已截断）'
+    except Exception:
+        text = str(text)[:MAX_PUSH_CHARS]
     with queue_lock:
         _seq += 1
         sse_queue.append((_seq, _sse_safe(json.dumps(
