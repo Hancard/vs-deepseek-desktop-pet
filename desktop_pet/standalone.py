@@ -20,6 +20,7 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+import urllib.request
 from urllib.parse import urlsplit, parse_qs
 
 from common import (get_screen_size, get_dpi_scale, WindowAPI, find_character_image,
@@ -1652,11 +1653,32 @@ def start_server(port: int, ready: threading.Event):
     ready.set()
     server.serve_forever()
 
+#: 只连本机，**绝不走系统代理**（0.3.46）。
+#:
+#: ⚠️ `urllib.request.urlopen` 默认读 http_proxy / https_proxy 环境变量，而它对
+#:    127.0.0.1 **不一定**绕过 —— CPython 的 proxy_bypass_registry 只认
+#:    `<local>`（无点主机名）和"前缀/后缀通配"，Windows 上极常见的
+#:    `ProxyOverride=...;127.*;...` 这种中间通配写法匹配不到。实测本机
+#:    （ProxyOverride 里明明有 `127.*;<local>`）：
+#:
+#:      proxy_bypass('127.0.0.1') = False
+#:      http_proxy 指向一个无人在听的端口时的 urlopen(127.0.0.1) = URLError
+#:      build_opener(ProxyHandler({})).open(同一地址)                = 200
+#:
+#:    后果不只是"探测慢"：代理进程退出但环境变量还残留（开发者机器上很常见）
+#:    时 `_ping_ok` 恒返回 False，而它在 main() 里用来区分「已有 Airi 实例」
+#:    和「端口被无关程序占用」—— 本来是前者的情况会被记成后者，
+#:    日志把人指向一个不存在的端口冲突。这条链路唯一的对端就是本机，
+#:    绕开代理没有任何副作用。（公网下载 Cubism Core 走 live2d_assets，
+#:    那条**应该**经过代理，不要一起改。）
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _ping_ok(port: int) -> bool:
     """探测端口上是否已有 Airi 服务器在运行（/ping 返回 200）"""
     try:
-        import urllib.request
-        with urllib.request.urlopen(f'http://127.0.0.1:{port}/ping', timeout=1.5) as resp:
+        with _LOCAL_OPENER.open(
+                f'http://127.0.0.1:{port}/ping', timeout=1.5) as resp:
             return resp.status == 200
     except Exception:
         return False
