@@ -752,6 +752,12 @@ async function doLaunchStandalonePet(): Promise<void> {
 	}
 
 	const python = findPythonPath();
+	// spawn 失败是**异步**的（'error' 事件），不是抛异常 —— `try/catch` 拦不到：
+	// `child.pid` 会是 undefined、进程一个都没有，但下面那个 8 秒循环照样跑。
+	// 结果用户先看到准确的一条"启动桌宠失败: spawn python ENOENT"，8 秒后
+	// 又看到一条**误导性**的"进程已启动但服务器未响应 … 请检查是否装了
+	// pywebview"，把人引去查一个根本没参与的问题（0.3.45）。
+	let spawnFailed = false;
 	try {
 		const child = spawn(python, [script], {
 			cwd: petDir,
@@ -760,6 +766,7 @@ async function doLaunchStandalonePet(): Promise<void> {
 			windowsHide: true,
 		});
 		child.on('error', (err) => {
+			spawnFailed = true;
 			vscode.window.showErrorMessage(`启动桌宠失败: ${err.message}`);
 		});
 		child.unref();
@@ -772,6 +779,9 @@ async function doLaunchStandalonePet(): Promise<void> {
 	const deadline = Date.now() + 8000;
 	while (Date.now() < deadline) {
 		await new Promise((resolve) => setTimeout(resolve, 500));
+		// 进程根本没起来就别等了：既不会起来，那句"请检查 pywebview"
+		// 也只会盖掉上面那条真正有用的错误。
+		if (spawnFailed) { void refreshPetStatus(); return; }
 		lastHealthCheckAt = 0; // 强制重新探测
 		if (await checkStandaloneAlive()) {
 			lastHealthCheckAt = Date.now();
