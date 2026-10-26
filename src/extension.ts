@@ -141,6 +141,8 @@ export function activate(context: vscode.ExtensionContext) {
 	const initialCorpusSeq = Number(readCorpusOpenSeq());
 	lastCorpusOpenSeq = Number.isFinite(initialCorpusSeq) && initialCorpusSeq > 0
 		? initialCorpusSeq : 0;
+	// 启动时的签名也算"已处理"：上一次会话里点过的请求不该在重启后被重放。
+	lastCorpusOpenSig = corpusOpenSig(lastCorpusOpenSeq);
 	const onPetSettingsChanged = (): void => {
 		syncPetTickFromSettings('settings file');
 		void openCorpusIfRequested();
@@ -278,12 +280,28 @@ const PET_SETTINGS_POLL_MS = 500;
 const PET_CORPUS_PATH = path.join(os.homedir(), '.dsh', 'pets',
 	'airi-pet-corpus.jsonc');
 
-/** 已经处理过的「编辑语料」请求序号。
- *  桌宠每点一次菜单就把 openCorpusSeq 加一写进设置文件；这里只处理
- *  **严格大于** 上次的序号。启动时用文件里的当前值初始化 —— 否则"点击时
- *  扩展没开着、由桌宠自己回落打开过一次"的请求，会在重启 VS Code 后被
- *  当成新请求再打开一遍。 */
+/** 已经处理过的「编辑语料」请求的签名（`序号@mtimeMs`）。
+ *
+ *  ⚠️ 为什么是签名而不是只比序号（0.3.45）：序号**不是**请求的唯一身份。
+ *  设置文件支持用户整份覆盖（README 教的 `Set-Content '{"detectIntervalSec":5}'`
+ *  会把 openCorpusSeq 一起抹掉），桌宠重启后又从 max(内存,磁盘)+1 起算，
+ *  于是可能算出一个**本会话已经用过**的号 —— 只比序号的话这种请求既不打开
+ *  也不回执，桌宠白等 2.5s 再回落 code 命令（在 VS Code 已经开着时再拉一个
+ *  窗口，正是三级回落要避免的观感）。反过来，"同一次写入被 watchFile 触发
+ *  两遍"的两条事件序号**和** mtime 都相同 —— 用签名就同时挡住重复、放过
+ *  重置。启动时用文件当前签名初始化，理由见下。 */
 let lastCorpusOpenSeq = 0;
+let lastCorpusOpenSig = '';
+
+/** 设置文件的「请求签名」：序号 + mtime（毫秒）。
+ *
+ *  mtime 用 stat 取，取不到（文件刚被删）就当 0：那一次事件本来就是"文件
+ *  没了"，序号也读不出来，顶层 `seq <= 0` 会挡掉。 */
+function corpusOpenSig(seq: number): string {
+	let mtime = 0;
+	try { mtime = fs.statSync(PET_SETTINGS_PATH).mtimeMs; } catch { mtime = 0; }
+	return `${seq}@${mtime}`;
+}
 
 /** 读设置文件里的「编辑语料」请求序号；文件缺失/损坏返回 undefined。 */
 function readCorpusOpenSeq(): unknown {
@@ -305,19 +323,20 @@ function readCorpusOpenSeq(): unknown {
 async function openCorpusIfRequested(): Promise<boolean> {
 	const seq = Number(readCorpusOpenSeq());
 	if (!Number.isFinite(seq) || seq <= 0) { return false; }
-	// ⚠️ 判据只能是"和上一次**相同**才忽略"，不能是 `seq <= lastCorpusOpenSeq`
-	// （0.3.44）。设置文件是"用户可整份覆盖"的（README 教的改周期写法就是
-	// `'{"detectIntervalSec": 5}' | Set-Content ...`），整份覆盖会把
-	// openCorpusSeq 字段一起抹掉 —— 桌宠重启后从 0 起算，下一次点击写 1。
-	// 而扩展内存里的 lastCorpusOpenSeq 还是旧值（比如 12），于是 seq=1..12
-	// 全被判成"已处理"：既不打开、也**不回执** → 桌宠等满 2.5s 后回落
-	// `code` 命令，在 VS Code 已经开着的时候再拉一个窗口，正是三级回落要
-	// 避免的观感；用户得连点 12 次才恢复。
+	// ⚠️ 判据从"序号是否变大"改成"**签名**是否变过"（0.3.45）。
 	//
-	// 序号在正常运行中只增不减，而这里读的是**文件当前值**（不是事件里
-	// 夹带的旧值）：所以"变小"只可能来自文件被重置/替换。真正要防的重放是
-	// "同一次请求被 watchFile 触发两遍"，那两条的 seq 必然相等。
-	if (seq === lastCorpusOpenSeq) { return false; }
+	// 0.3.44 用的是 `seq === lastCorpusOpenSeq`（因为 `<=` 会在文件被整份覆盖、
+	// 序号被重置后连点 12 次才恢复）。但那只是把"永远不接单"换成了"同号不接单"：
+	// 桌宠重启后从 max(内存,磁盘)+1 起算，算出的号可能正好是本会话已处理过的
+	// 那个 —— 于是既不打开、也**不回执**，桌宠白等 2.5s 再回落 code 命令。
+	//
+	// 签名 = 序号 + 文件 mtime，正好把两种情况分开：
+	//   · 同一次写入被 watchFile 触发两遍 → 序号与 mtime 都相同 → 忽略；
+	//   · 序号被重置后重新写入 → mtime 必然是新的 → 正常处理。
+	// 序号本身只增不减，所以"变小"只可能来自文件被重置/替换。
+	const sig = corpusOpenSig(seq);
+	if (sig === lastCorpusOpenSig) { return false; }
+	lastCorpusOpenSig = sig;
 	lastCorpusOpenSeq = seq;
 
 	let ok = false;
