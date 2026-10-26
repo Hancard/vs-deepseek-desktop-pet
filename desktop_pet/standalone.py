@@ -271,6 +271,25 @@ def load_settings():
     return {'detectIntervalSec': DETECT_DEFAULT_SEC, 'openCorpusSeq': 0}
 
 
+def _settings_from_disk():
+    """严格读磁盘：读不到 / 不是对象 → None（0.3.45）。
+
+    ⚠️ 与 load_settings() 的区别就在这里：load_settings 读失败时**回落默认值**，
+    调用方分不清"文件里就是 30"和"文件坏了所以给你 30"。而 GET /settings
+    要拿磁盘上的值去刷新内存，文件坏了的那一刻必须**什么都不做**（保持当前
+    生效值），不能把内存里的 5 秒悄悄改成 30 秒。
+    """
+    try:
+        with open(SETTINGS_PATH, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {'detectIntervalSec': clamp_detect_sec(data.get('detectIntervalSec')),
+            'openCorpusSeq': _as_seq(data.get('openCorpusSeq'))}
+
+
 def save_settings(new):
     """原子写：先写同目录临时文件再 os.replace。
 
@@ -338,7 +357,21 @@ def _persist_locked(key, value):
 def settings_payload():
     """给前端和扩展的统一视图：当前值 + 合法范围。
 
-    范围随 payload 一起发，前端就不用自己写死 1 和 60（写死了早晚和这里不一致）。"""
+    范围随 payload 一起发，前端就不用自己写死 1 和 60（写死了早晚和这里不一致）。
+
+    ⚠️ 必须**先从磁盘刷新内存**（0.3.45）。`settings` 只是启动时 load 的一份
+    快照，而这个文件明确支持用户手改（README 教的改周期写法就是整份覆盖）。
+    手改之后、下一次 POST 之前，GET 一直返回旧值 —— 而前端打开右键菜单时
+    会把它当**权威**：菜单显示旧的周期，用户再点「+」，前端从旧值推新值发
+    POST，`_persist_locked` 把磁盘上的新值覆盖掉。用户看到的就是
+    "我改的文件它不认，还给我改回去了"（0.3.43 已经给 openCorpusSeq 的
+    "内存 vs 磁盘"修过一次，这里是同一个坑的另一半：读的人也没刷新）。
+    """
+    disk = _settings_from_disk()
+    if disk is not None:
+        with settings_lock:
+            for k, v in disk.items():
+                settings[k] = v
     return {'detectIntervalSec': settings['detectIntervalSec'],
             'min': DETECT_MIN_SEC,
             'max': DETECT_MAX_SEC,
