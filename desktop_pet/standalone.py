@@ -226,7 +226,14 @@ def _as_int(value, default=0):
 
     这个坑本项目已经踩过三次（clamp_detect_sec、_as_seq、_corpus_open_ack），
     `/push` 的 error_count 两处是第四、第五处。收敛到一个入口，别再各写各的。
+
+    ⚠️ 布尔也算"不是数量"（0.3.46）：`int(True)` 是 1，于是
+    `{"count": true}` 会被念成"1 个错误"、`{"error_count": false}` 念成 0 个
+    —— 而这条值通常来自手改坏的文件或第三方脚本，不是真的在数数。
+    与 `_as_number` / `_as_seq` 同一个口径（见那里的注释）。
     """
+    if isinstance(value, bool):
+        return default
     try:
         return int(value)
     except (TypeError, ValueError, OverflowError):
@@ -250,7 +257,15 @@ def _as_seq(value):
 
     ⚠️ 必须连 OverflowError 一起兜住：Python 的 json 默认接受字面量 Infinity，
     `int(float('inf'))` 抛的就是它 —— 与 clamp_detect_sec 同源的老坑。
+
+    ⚠️ 布尔值一律算 0（0.3.46）。`bool` 是 `int` 的子类，`int(True)` 就是 1，
+    于是一份手改坏的设置文件（`"openCorpusSeq": true`）会被读成一个**合法
+    序号 1**：扩展那边 `seq > 0` 成立 → 打开语料并回执，桌宠的首次点击反而
+    撞上"已处理"再也不打开。0.3.45 给 `_as_number` 立的口径是"布尔不是数字"，
+    这里是同一个判断的另两个入口（`_as_int` 同理），不能各写各的。
     """
+    if isinstance(value, bool):
+        return 0
     try:
         n = int(value)
     except (TypeError, ValueError, OverflowError):

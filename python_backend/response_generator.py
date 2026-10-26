@@ -227,8 +227,17 @@ def generate_response(context: dict) -> dict:
     # "generate failed: OverflowError"，看着像后端坏了；② 整条播报绕过正常
     # 路径（连 LLM 都不试），只靠兜底台词。收敛成 0 是既有口径（`/push` 侧的
     # `_as_int` 同样给 0），改的是"不许抛"，不是"猜它到底几个错误"。
+    # ⚠️ 布尔不是数量（0.3.46）：`int(True)` 是 1，而 `{"error_count": true}`
+    # 能一路走到这里 —— 于是"有 1 个错误"被念出来，还配一张 errorAlert 红脸。
+    # 这条值与 standalone._as_int / _as_seq / _as_number 必须同一个口径
+    # （那边也刚改成拒绝布尔），否则同一个请求在两个进程里得到不同的错误数。
+    # 放在 int() **之前**归一，而不是算完再覆盖 —— 后者看起来像补丁，
+    # 而且回写 context 之后 try_deepseek_api 读到的才是同一个数。
+    raw_count = context.get("error_count", 0)
+    if isinstance(raw_count, bool):
+        raw_count = 0
     try:
-        error_count = int(context.get("error_count", 0) or 0)
+        error_count = int(raw_count or 0)
     except (TypeError, ValueError, OverflowError):
         error_count = 0
     # ⚠️ 必须回写（0.3.40）：try_deepseek_api 读的是 **context 里的原始值**，
