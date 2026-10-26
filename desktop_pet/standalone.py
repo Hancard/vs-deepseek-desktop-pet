@@ -12,6 +12,7 @@ import sys
 import os
 import json
 import random
+import re
 import shutil
 import socket
 import subprocess
@@ -150,22 +151,67 @@ def flush_port_warning():
         log('[airi-standalone] ' + _port_warning.pop(0))
 
 
+#: 严格的"数字字面量"形态（0.3.45）。**只认十进制小数与科学计数**。
+#:
+#: ⚠️ 为什么不能用 `float(value)` 直接兜：Python 的 float() 认一堆 JS 的
+#: `Number()` **不认**的写法，两边于是对同一个设置文件给出不同答案：
+#:   · `float('1_0')` == 10（下划线分隔，Python 3.6+ 合法），`Number('1_0')` 是 NaN；
+#:   · `float('  ')` 抛异常 → 回落 30，而 `Number('  ')` 是 **0**；
+#:   · `float(True)` == 1.0 —— 布尔**是** int 的子类，设置文件里写
+#:     `"detectIntervalSec": true`（合法 JSON）会把周期从 30 秒打成 **1 秒**。
+#:     0.3.44 只在扩展侧挡了这半（`readDetectIntervalMs`），桌宠自己
+#:     `load_settings()` 仍读成 1，而且下一次任何保存都会把这个 1 写回磁盘。
+#: 统一成"先照这个正则判形态，再转换"，两边才可能真正一致。
+_NUM_RE = re.compile(r'[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?')
+
+
+def _as_number(value):
+    """把 JSON 值收敛成有限 float；不是"数字"就返回 None（0.3.45）。
+
+    @returns float 或 None。**布尔一律算不可用**（见 _NUM_RE 的注释）。
+    """
+    if isinstance(value, bool):        # ⚠️ 必须在 int/float 之前判：bool 是 int 子类
+        return None
+    if isinstance(value, (int, float)):
+        n = float(value)
+    elif isinstance(value, str):
+        # 只认整串都是数字形态的字符串：`'30px'` / `''` / `' '` / `'1_0'`
+        # 一律不可用（`Number()` 与 `float()` 对它们的行为都不一致）。
+        text = value.strip()
+        if not _NUM_RE.fullmatch(text):
+            return None
+        try:
+            n = float(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    else:
+        return None
+    if n != n or n in (float('inf'), float('-inf')):   # NaN / ±Inf
+        return None
+    return n
+
+
 def clamp_detect_sec(value):
     """把任意输入收敛成 [1, 60] 整数秒；坏输入回落默认值。
 
-    · 小数四舍五入取整 —— 与前端 setDetectSec 里的 Math.round 对齐。两边对
-      同一个值给出不同结果，迟早变成"界面显示 4 秒、实际跑 3 秒"这种鬼问题。
-    · ±Infinity / NaN / 字符串垃圾一律算"不可用" → 回落默认值。注意 Python 的
-      json **默认就接受**字面量 Infinity / NaN，所以这些值真的能走到这里；
-      而 round(float('inf')) 抛的是 OverflowError —— 只兜
-      (TypeError, ValueError) 会让这个请求 500 断连（与 0.3.17 / 0.3.25 那几轮
-      "畸形 body 炸穿链路"是同一类）。
+    · 小数取整用**银行家舍入**（Python 的 round / 前端 0.3.45 起的
+      roundHalfEven）—— 两边对同一个值给出不同结果，迟早变成
+      "界面显示 3 秒、实际跑 2 秒"这种鬼问题（2.5 就是分界点：
+      `Math.round(2.5)` 是 3，`round(2.5)` 是 2）。
+    · ±Infinity / NaN / 布尔 / 字符串垃圾一律算"不可用" → 回落默认值。
+      注意 Python 的 json **默认就接受**字面量 Infinity / NaN，而这些值真的
+      能走到这里；`round(float('inf'))` 抛的是 OverflowError —— 只兜
+      (TypeError, ValueError) 会让这个请求 500 断连。
     """
-    try:
-        n = int(round(float(value)))
-    except (TypeError, ValueError, OverflowError):
+    n = _as_number(value)
+    if n is None:
         return DETECT_DEFAULT_SEC
-    return max(DETECT_MIN_SEC, min(DETECT_MAX_SEC, n))
+    try:
+        sec = int(round(n))
+    except (TypeError, ValueError, OverflowError):
+        # 兜底：round 对有限 float 不会抛，但别让这里有第二个穿出点
+        return DETECT_DEFAULT_SEC
+    return max(DETECT_MIN_SEC, min(DETECT_MAX_SEC, sec))
 
 
 def _as_int(value, default=0):

@@ -248,6 +248,13 @@ const PET_TICK_DEFAULT_MS = 30000;
 const DETECT_MIN_SEC = 1;
 const DETECT_MAX_SEC = 60;
 
+/** 字段存在但**不是数字**时的取值（0.3.45），与 standalone.py 的
+ *  DETECT_DEFAULT_SEC 同值。为什么不是"保持当前值"：桌宠那侧
+ *  `load_settings()` 对同一个坏值是回落 30 的，而 `GET /settings` 现在会先把
+ *  磁盘读进内存（见 settings_payload）—— 菜单会显示 30，扩展却按上一拍的
+ *  5 秒跑。两边给出同一个数比"谁更保守"重要。 */
+const DETECT_DEFAULT_SEC = 30;
+
 /** 桌宠的设置文件（**Python 侧是唯一写入方**，扩展只读）。
  *
  *  为什么走文件而不是让扩展轮询桌宠的 HTTP：
@@ -338,38 +345,67 @@ let petTickTimer: NodeJS.Timeout | undefined;
 /** 诊断是否有未推送到桌宠的变化（petTick 消费后清零） */
 let diagPushPending = false;
 
-/** 读桌宠设置里的检测周期（毫秒）；文件缺失/损坏/字段非法一律返回 undefined
- *  （调用方保持当前值，不要因为一个坏文件把周期打成默认值）。 */
+/** 与 Python 的 `_NUM_RE` 同形：十进制小数 / 科学计数，整串必须匹配。 */
+const NUM_LITERAL_RE = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/;
+
+/** 银行家舍入（四舍六入五取偶），与 Python 内置 `round()` 一致。
+ *
+ *  ⚠️ `Math.round(2.5)` 是 **3**，而 `round(2.5)` 是 **2** —— 用户手改
+ *  `detectIntervalSec: 2.5` 时，扩展按 3 秒跑、桌宠按 2 秒显示，正是
+ *  0.3.42 那条注释在骂的"界面和实际不一致"。 */
+function roundHalfEven(n: number): number {
+	const floor = Math.floor(n);
+	const diff = n - floor;
+	if (diff > 0.5) { return floor + 1; }
+	if (diff < 0.5) { return floor; }
+	return floor % 2 === 0 ? floor : floor + 1;   // 正好 .5 → 取偶
+}
+
+/** 把设置文件里的值收敛成秒；**不是数字形态就返回 undefined**（0.3.45）。
+ *
+ *  ⚠️ 判据必须是"形态像数字"，不能是 `Number(raw)`。`Number()` 认一堆
+ *  桌宠侧 `float()` 不认（或反之）的写法，两边于是对同一个文件给出不同答案：
+ *    · `Number('0x10')` = 16，`float('0x10')` 抛异常 → 一边 16 秒一边 30 秒；
+ *    · `Number('  ')` = **0**，`float('  ')` 抛异常；
+ *    · `None(true)` = **1**（0.3.44 挡掉的那半）；
+ *    · `Number(['45'])` = 45（数组带单个数字字符串）。
+ *  这里改成"先按正则判形态、再转换"，与 Python 的 `_as_number` 同构。
+ */
+function parseDetectSec(raw: unknown): number | undefined {
+	let n: number;
+	if (typeof raw === 'number') {
+		n = raw;
+	} else if (typeof raw === 'string' && NUM_LITERAL_RE.test(raw.trim())) {
+		n = Number(raw.trim());
+	} else {
+		return undefined;          // 布尔 / 数组 / 对象 / null / 非数字串
+	}
+	if (!Number.isFinite(n)) { return undefined; }   // NaN / ±Infinity 字面量
+	return n;
+}
+
+/** 读桌宠设置里的检测周期（毫秒）。
+ *
+ *  @returns
+ *   · **undefined** —— 文件读不到 / JSON 坏了（可能是编辑器正在写）。
+ *     调用方保持当前值：半截文件不代表用户改了什么。
+ *   · **number** —— 字段的合法值，越界按 [1,60] 夹取（与 Python 一致）。
+ *     字段**存在但不是数字形态**时返回默认值 30 秒（0.3.45）：桌宠那次
+ *     `load_settings()` 对同一个值也是回落 30，两边必须给出同一个数，
+ *     否则"菜单显示 30 秒、实际 5 秒"这种不一致就永远存在。
+ */
 function readDetectIntervalMs(): number | undefined {
 	try {
 		const data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8')) as
 			{ detectIntervalSec?: unknown };
 		const raw = (data as { detectIntervalSec?: unknown })?.detectIntervalSec;
-		// ⚠️ 只接受 number 与"纯数字字符串"（0.3.44）。以前写的是
-		// `typeof raw === 'number' ? raw : Number(raw)`，而 `Number(true)` 是 **1**
-		// （`Number(false)` 是 0，恰好被下面的 <= 0 挡住，于是只有 true 漏网）：
-		// 设置文件里写 `"detectIntervalSec": true`（合法 JSON）就把周期从 30 秒
-		// 打成 **1 秒**，每拍推一次、后端每拍起一个生成线程。同样漏的还有
-		// `Number(["45"]) === 45`（数组带单个数字字符串）。
-		// 现在布尔/数组/对象一律 NaN → 走下面的 undefined 分支保持当前值，
-		// 与 Python 侧 clamp_detect_sec 的口径一致。
-		const sec = typeof raw === 'number'
-			? raw
-			: (typeof raw === 'string' ? Number(raw) : NaN);
-		// ⚠️ 0 是 finite，`Number.isFinite` 拦不住它（0.3.42）。
-		// 而 Number(null) / Number('') / Number([]) / Number(false) 全都是 0，
-		// 于是"字段非法返回 undefined"这句契约对它们全部失效 —— 走下去
-		// Math.max(1, Math.min(60, 0)) 得到的是**下界 1 秒**，比默认值 30 秒
-		// 激进 30 倍：每 1 秒一拍，桌宠每秒被推一条、后端每秒起一个生成线程
-		// （很快撞上 MAX_PENDING_GENERATIONS），状态栏与 fs.watchFile 同步跟着抖。
-		// 而且和 Python 侧 clamp_detect_sec 的口径相反 —— 那边对 null/''/[]
-		// 回落默认 30。两边必须一致，否则用户手改设置文件后（文件头的注释
-		// 正是为这种情况准备的）看到的就是"扩展说 1 秒、桌宠说 30 秒"。
-		if (!Number.isFinite(sec) || sec <= 0) { return undefined; }
-		const clamped = Math.max(DETECT_MIN_SEC, Math.min(DETECT_MAX_SEC, Math.round(sec)));
+		const sec = parseDetectSec(raw);
+		if (sec === undefined) { return DETECT_DEFAULT_SEC * 1000; }
+		const clamped = Math.max(DETECT_MIN_SEC,
+			Math.min(DETECT_MAX_SEC, roundHalfEven(sec)));
 		return clamped * 1000;
 	} catch {
-		return undefined;
+		return undefined;      // 文件不见了 / JSON 半截：保持当前周期
 	}
 }
 
