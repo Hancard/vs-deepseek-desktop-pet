@@ -220,9 +220,16 @@ def generate_response(context: dict) -> dict:
     """
     trigger = context.get("trigger", "diagnostics")
     # 外部输入不可信：error_count 传 "3"/None 等会让后面的 >= 比较抛 TypeError
+    # ⚠️ 必须连 OverflowError 一起兜（0.3.45）：Python 的 json 默认接受字面量
+    # `1e999` / `Infinity`，解析成 float('inf')，而 `int(inf)` 抛的正是它
+    # （不属 TypeError/ValueError）。只兜那两个时，异常从**这个入口**穿出去 ——
+    # standalone 那边确实有 _fallback 接住，但代价是：① 每次都在日志里留一条
+    # "generate failed: OverflowError"，看着像后端坏了；② 整条播报绕过正常
+    # 路径（连 LLM 都不试），只靠兜底台词。收敛成 0 是既有口径（`/push` 侧的
+    # `_as_int` 同样给 0），改的是"不许抛"，不是"猜它到底几个错误"。
     try:
         error_count = int(context.get("error_count", 0) or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         error_count = 0
     # ⚠️ 必须回写（0.3.40）：try_deepseek_api 读的是 **context 里的原始值**，
     # 不回写的话 error_count="3"（字符串）到那边就是 `str > int` → TypeError
