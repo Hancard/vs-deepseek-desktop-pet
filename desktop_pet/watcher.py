@@ -158,6 +158,26 @@ CHECKERS = {
 SKIP_PARTS = ('node_modules', 'venv', '__pycache__', 'build', 'dist', '.git')
 
 
+#: 只连本机，**绝不走系统代理**（0.3.46）。
+#:
+#: ⚠️ urllib 默认读 http_proxy / https_proxy 环境变量，而它对 127.0.0.1
+#:    **不一定**绕过：CPython 的 proxy_bypass_registry 只认 `<local>`（无点
+#:    主机名）和"前缀/后缀通配"，Windows 上常见的 `127.*` 这种中间通配写法
+#:    匹配不到 —— 实测本机（ProxyOverride 里明明写了 `127.*;<local>`）：
+#:
+#:     proxy_bypass('127.0.0.1')                              = False
+#:     默认 urlopen('http://127.0.0.1:<无人在听的口令端口>')  = URLError
+#:                                                            [WinError 10061] 目标计算机积极拒绝
+#:     build_opener(ProxyHandler({})).open(同一个地址)         = 200
+#:
+#:    也就是说，只要环境里挂着 http_proxy（开发者机器上极常见：代理软件设的
+#:    系统代理、或 shell profile 里 export 的），本文件的推送就会先连代理。
+#:    代理活着时常能转发成功，代理一关就全部失败 —— 而下面两处推送都是
+#:    `except Exception: pass`，"代理挂了"于是表现成"桌宠什么都不说"，
+#:    日志里零行。这条链路的唯一出口是本机，绕开代理没有任何副作用。
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def should_skip(rel_parts) -> bool:
     """是否跳过这个**相对**路径（rel_parts = 相对监听根的各段）。
 
@@ -299,24 +319,36 @@ def watch_directory(watch_dir: str, port: int):
             ], ensure_ascii=False)
             is_first_scan = last_signature is None
             if signature != last_signature:
-                last_signature = signature
-                if not (is_first_scan and error_count == 0):
-                    # 推送到桌宠
+                if is_first_scan and error_count == 0:
+                    # 启动时本来就干净：不需要推送，但要记下来，否则每一轮
+                    # 都会被判成"第一次扫描"（判定条件就是 last_signature is None）
+                    last_signature = signature
+                else:
+                    # ⚠️ 签名只能在**真的送到之后**提交（0.3.46）。
+                    # 以前是"先提交、再推送"，而推送失败几乎是常态：桌宠还没
+                    # 起来（用户先改代码后开桌宠）、或者刚被关掉。那时签名已经
+                    # 记成"这版状态报过了"，于是**同一批错误再也不会播报** ——
+                    # 除非用户又改出新的错误（签名变化）。本文件另外两条链路
+                    # （known_errors / all_clear 判定）都在认真区分"说过"和
+                    # "送到了"，只有这一处把两者混为一谈。
+                    # 不提交的代价只是下一轮重试（1.5 秒一次连接尝试），
+                    # 与 push_message 侧"宁可重试也不静默丢单"同一口径。
                     try:
                         data = json.dumps(payload, ensure_ascii=False).encode()
                         req = urllib.request.Request(
                             push_url, data=data,
                             headers={'Content-Type': 'application/json'}
                         )
-                        with urllib.request.urlopen(req, timeout=3) as resp:
+                        with _LOCAL_OPENER.open(req, timeout=3) as resp:
                             resp.read()
+                        last_signature = signature      # 送达才提交
                         if error_count > 0:
                             files_str = ', '.join(os.path.basename(f) for f, _ in changed_files) or '(cached)'
                             print(f'[watcher] → {error_count} error(s) [{files_str}]', flush=True)
                         else:
                             print(f'[watcher] → all clear!', flush=True)
                     except Exception:
-                        pass  # 桌宠服务器未运行，静默跳过
+                        pass  # 桌宠服务器未运行，静默跳过（下一轮重试）
 
             time.sleep(1.5)  # 轮询间隔
 
@@ -383,14 +415,17 @@ def watch_single_file(filepath: str, port: int):
                             'sample_errors': [],
                         }
 
+                        # ⚠️ 与目录模式同一条修正（0.3.46）：签名在**送达之后**
+                        # 才提交，否则桌宠没起来时这条播报就此永久消失。
                         try:
                             data = json.dumps(payload, ensure_ascii=False).encode()
                             req = urllib.request.Request(
                                 push_url, data=data,
                                 headers={'Content-Type': 'application/json'}
                             )
-                            with urllib.request.urlopen(req, timeout=3) as resp:
+                            with _LOCAL_OPENER.open(req, timeout=3) as resp:
                                 resp.read()
+                            last_signature = signature    # 送达才提交
                             if error_count > 0:
                                 print(f'[watcher] {os.path.basename(filepath)}: {error_count} error(s)', flush=True)
                             else:
