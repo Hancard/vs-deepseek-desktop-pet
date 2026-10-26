@@ -1,5 +1,111 @@
 # Change Log
 
+## [0.3.45] — 2026-10-26
+
+### Fixed
+
+- **设置文件里写 `"detectIntervalSec": true` 仍是 1 秒（Python 侧没跟上）**（`standalone.py`）
+  0.3.44 只在扩展侧挡住了布尔值，桌宠自己的 `clamp_detect_sec()` 还在走
+  `float(value)` —— 而 `bool` 是 `int` 的子类、`float(True) == 1.0`，于是启动读成
+  **1 秒**（30 倍播报），更糟的是下一次**任何**保存（比如点一次「编辑语料」）都会把
+  这个 1 整份写回磁盘，扩展 watch 到就真的开始每 1 秒一拍。同一个洞还有
+  `float('1_0') == 10` 与 `float('  ')`（抛异常 → 30），而 JS 的 `Number()` 对它们
+  分别是 `NaN` / `0` —— 两边对同一份文件给出不同答案。修：新增 `_as_number()`，
+  只认"int/float（非 bool）"与"整串匹配十进制/科学计数正则的字符串"，其余一律
+  不可用；扩展侧同步新增 `parseDetectSec()`，两边同构。
+- **`2.5` 在两边差一秒**（`standalone.py` / `src/extension.ts`）
+  `Math.round(2.5)` 是 3，Python 的 `round(2.5)` 是 2（银行家舍入）—— 用户手改
+  `2.5` 就成了"菜单显示 2 秒、实际每 3 秒一拍"。修：扩展侧新增 `roundHalfEven()`，
+  与 Python 的口径对齐，并附跨实现一致性断言（20 个样例两边结果必须相等）。
+- **字段非法时扩展"保持当前值"、桌宠回落 30 秒**（`src/extension.ts`）
+  `readDetectIntervalMs()` 对非法字段返回 `undefined`（调用方不动周期），而桌宠
+  `load_settings()` 对同一个值回落 30 —— 设置文件被写坏之后，菜单显示 30 秒、扩展
+  却还按上一拍的 5 秒跑。修：字段非法 → 默认 30 秒（与 Python 同值）；只有"文件读不到 /
+  JSON 半截"才继续返回 `undefined`（那可能是编辑器正在写，不该改周期）。
+- **`GET /settings` 只返回启动时的内存快照**（`standalone.py`）
+  `settings` 是启动 `load_settings()` 的一份快照，而这个文件明确支持用户手改
+  （README 教的改周期写法就是整份覆盖）。手改之后、下一次 POST 之前，右键菜单一直
+  显示旧值 —— 而前端把它当**权威**：菜单显示 30 秒，用户点「+」，前端从 30 算出 31
+  发 POST，`_persist_locked` 把磁盘上手写的 5 **覆盖掉**。用户看到的就是"我改的文件
+  它不认，还给我改回去了"（0.3.43 给 `openCorpusSeq` 修过同一个坑，这里是"读的人
+  也没刷新"那一半）。修：`settings_payload()` 先用新加的 `_settings_from_disk()`
+  刷新内存；文件坏了（半截 JSON）时**什么都不做**，不能把正在生效的值改回默认。
+- **`{"type": null}` / `{"emotion": 1e999}` 让整条气泡消失**（`standalone.py`）
+  `json.dumps` 默认 `allow_nan=True`，`1e999` 解析成 `float('inf')` 后帧里就写出字面量
+  `Infinity` —— 那不是合法 JSON，前端 `JSON.parse` 直接抛错（被 catch 成一条
+  `reportJS`），**气泡不显示**；坏帧还留在队列里，之后每次重连按 `SSE_REPLAY_COUNT`
+  重播都再炸一次。`type` 是另一面：`msg.get('type', 'chatMessage')` 只在**键缺失**
+  时回落，`null` / 数字 / 拼错的名字都原样进帧，前端 `if (!msg || !msg.type) return;`
+  或 `switch` 落空 —— 而 HTTP 已经回了 200 `{"status":"pushed"}`，发送方以为送到了。
+  修：在 `push_message()` 这个唯一出口里把三个字段全部归一化（`_as_msg_type`
+  白名单、`_as_emotion`、`_as_text`），并用 `allow_nan=False` 把"帧必须能被
+  `JSON.parse`"变成硬约束。
+- **落盘失败后连续点「编辑语料」会算出同一个序号**（`standalone.py`）
+  `_persist_locked` 失败时把内存回滚成磁盘值，而序号公式是
+  `max(内存, 磁盘) + 1` —— 下一次点击算出**完全相同**的 seq，而
+  `_corpus_open_wait[seq] = slot` 是无条件覆盖：前一个 worker 的等待槽被顶掉，
+  扩展只回执一个 seq，前一个等满 2.5s 判成"没人接单"走 `code` 回落 → 同一个语料
+  文件被两个程序各打开一次（"两边都能写，谁后保存谁覆盖"）。修：新增只增不减的
+  `_corpus_seq_floor`，序号取三者的最大值 + 1。
+- **0.3.44 引入的回归：字面花括号被整条丢弃**（`python_backend/corpus.py`）
+  `_norm_placeholders()` 原来无条件把 `{ 单词 }` 收窄成 `{word}`，归一之后
+  `_PLACEHOLDER_RE` 才第一次能匹配到它 —— 不在白名单里就**整条台词丢弃**。
+  于是「备注：{ 待定 }」「这个 { 名字 } 我先记下了」「`if (a > b) { return }`」
+  这些本来原样显示的句子突然全没了，用户只看到"我写的台词不生效"。
+  修：只归一**已知占位符名**（`_ALL_PLACEHOLDER_NAMES`，即所有场景白名单的并集），
+  其余花括号保持原样。
+- **`error_count: 1e999` 让 `generate_response` 抛异常**（`python_backend/response_generator.py`）
+  `int(inf)` 抛 `OverflowError`，那里只兜 `(TypeError, ValueError)` —— 异常从后端入口
+  穿出，整条播报绕过正常路径（连 LLM 都不试），只靠兜底台词，且每次都留一条
+  "generate failed: OverflowError"看着像后端坏了。修：连 `OverflowError` 一起兜
+  （`/push` 侧的 `_as_int` 早就是这样，这是漏掉的第六处）。
+- **「编辑语料」在序号被重置后可能既不打开也不回执**（`src/extension.ts`）
+  0.3.44 的判据是 `seq === lastCorpusOpenSeq`：设置文件被整份覆盖（README 教的
+  `Set-Content '{"detectIntervalSec":5}'`）会把 `openCorpusSeq` 一起抹掉，桌宠重启后
+  从 `max(内存,磁盘)+1` 起算，算出的号可能正好是本会话已处理过的那个 —— 于是
+  `return false` 直接跳过，**连回执都不发**，桌宠白等 2.5s 再回落 `code` 命令。
+  修：请求身份改成 `序号@文件mtime` 签名 —— 同一次写入被 `watchFile` 触发两遍时
+  两者都相同（照旧丢弃），序号被重置后重新写入时 mtime 必然是新的（正常处理）。
+- **spawn 失败后仍等满 8 秒并补一条误导性诊断**（`src/extension.ts`）
+  Python 路径不存在时 `spawn` 走 `'error'` 事件（ENOENT），**不抛异常**，`try/catch`
+  拦不到 —— 用户先看到准确的"启动桌宠失败: spawn python ENOENT"，8 秒后又看到
+  "桌宠进程已启动但服务器未响应 … 请检查是否装了 pywebview"，被引去查一个根本没
+  参与的问题。修：加 `spawnFailed` 标记，进程没起来就不再等、也不再补那条警告。
+- **非 Live2D 模式下 `head` / `desk` 的点击台词永远触发不到**（`ui.html`）
+  `zoneAt()` 开头是 `if (!live2d.ready || !live2d.app) return 'body';` —— 而
+  `LIVE2D_ENABLED=false` / 素材缺失 / 半初始化失败时角色是图片或 CSS Q 版人，
+  **照样可以点**（`alphaAt()` 专门写了外接框兜底）。结果 `click.head` / `click.desk`
+  里写的台词一条都不出现（日志里只有 `zone=body`），`ry` 也恒为 -1，想校准都没有
+  数据。修：新增 `zoneBox()`，非 Live2D 时用角色元素的外接框，命中判定与分区共用
+  同一个框。
+- **Live2D 半初始化失败后角色彻底消失**（`ui.html`）
+  `ready = true` 写在 `await model.motion(...)` **之前**，动作加载失败就跳到 catch：
+  清场把 `live2dStage` / `live2d-active` 撤了，却没有把 1049 行撤掉的 `cssChar`
+  放回来 —— 而 `showImageCharacter()` 在 `CHAR_IMG` 为空（只用 Live2D、或删掉了
+  `assets/character*`）时第一行就 return。于是页面上只剩名牌和一片空白，
+  `fallbackCharacterEl()` 返回 null → `alphaAt()` 恒 0 → 点哪儿都没反应、
+  右键菜单也唤不出来。修：清场时先把 CSS 角色加回来，再让图片接管。
+- **情绪变体图的异步回调会把 PNG 垫回模型下面**（`ui.html`）
+  `onload` / `onerror` 只认领了"自己的情绪"，没认领"自己的渲染方式"：图片加载
+  期间 `initLive2D` 完全可能已经接管，回调却无条件 `charImg.style.display='block'`
+  —— 不透明 PNG 垫在 canvas 底下，从模型透明区透出来（"两个角色叠在一起"）。
+  修：两个回调都先判 `live2d.ready`。
+- **成功的 POST 被后发请求作废，回滚到磁盘上已经不存在的值**（`ui.html`）
+  `diskDetectSec` 的更新写在 `if (seq !== settingsSeq) return;` **之后**：点 +
+  （30→31，落盘成功）→ 立刻再点 +（31→32，失败）—— 第一个响应因序号过期被丢掉，
+  基准还停在 30，第二个失败就回滚到 30，而磁盘上是 31：**界面 30 / 磁盘 31 /
+  气泡说"没保存成功"**，三个值互不相同（正是 0.3.44 注释宣称已消灭的那种）。
+  修：磁盘事实先于序号闸门更新（闸门只保护界面）。
+- **右键打开菜单时的 GET 会把刚点的乐观值打回旧值**（`ui.html`）
+  `setDetectSec()` 到真正 POST 之间隔着 150ms 防抖：点完 chip 立刻右键，GET 先回来
+  就把乐观值改回旧值 —— 界面上数字跳一下再跳回去，而磁盘那时还没变。修：有待发的
+  点击时（`pendingDetectSec !== null`）基准照更新、界面留给那次 POST 收尾。
+- **「编辑语料」的守卫比后端回执窗口短**（`ui.html`）
+  0.3.44 把释放窗口定成 700ms，而后端 `CORPUS_OPEN_ACK_TIMEOUT` 是 **2.5s**：扩展
+  500ms 轮询没及时回执时（VS Code 正在启动/忙），用户在这个"毫无反馈"的空档里再点
+  一次非常自然 —— 那是第二个请求，扩展只回执最大的 seq，先发的那个等满 2.5s 走
+  `code` 回落 → 同一个语料文件被打开两次。修：窗口提到 2600ms（≥ 回执窗口）。
+
 ## [0.3.44] — 2026-10-25
 
 ### Fixed
