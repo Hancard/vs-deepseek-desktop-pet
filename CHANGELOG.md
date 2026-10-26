@@ -1,5 +1,81 @@
 # Change Log
 
+## [0.3.46] — 2026-10-27
+
+### Fixed
+
+- **本机回环请求被系统代理劫持 → 独立 watcher 静默失效**（`desktop_pet/watcher.py` / `desktop_pet/standalone.py`）
+  `watcher.py` 的两处 `/push` 推送和 `standalone.py` 的 `_ping_ok()` 都用
+  `urllib.request.urlopen`，而它默认读 `http_proxy` / `https_proxy`，**对 127.0.0.1
+  并不一定绕过**：CPython 的 `proxy_bypass_registry()` 只认 `<local>`（无点主机名）
+  和"前缀 / 后缀通配"，Windows 上极常见的 `ProxyOverride=...;127.*;...` 这种中间
+  通配写法匹配不到。实测本机（ProxyOverride 里明明写着 `127.*;<local>`）：
+  ```
+  proxy_bypass('127.0.0.1')                                = False
+  http_proxy 指向无人在听的端口时 urlopen('http://127.0.0.1:<port>/push')
+                                                           = URLError [WinError 10061]
+  build_opener(ProxyHandler({})).open(同一地址)             = 200
+  ```
+  于是"代理软件退出、环境变量还残留"（开发者机器上非常常见）时：`--dir` 那条 watchdog
+  的**每一条诊断都投不出去**，而失败分支是 `except Exception: pass` —— 用户看到的是
+  "桌宠对代码一声不吭"，日志里零行；`_ping_ok` 则恒返回 False，它在 `main()` 里用来
+  区分「已有 Airi 实例」和「端口被无关程序占用」，本来是前者的情况会被记成后者。
+  修：两处都改用显式的 `_LOCAL_OPENER = build_opener(ProxyHandler({}))`。
+  **公网下载 Cubism Core（`live2d_assets.py`）保持默认 opener** —— 那条本来就该走代理。
+- **推送失败时签名已被提交 → 那批错误再也不会播报**（`desktop_pet/watcher.py`）
+  两处去重都是"先 `last_signature = signature`，再发请求"，而推送失败几乎是常态：
+  用户先改代码、后开桌宠；或者桌宠刚被关掉。那一刻签名已经记成"这版状态报过了"，
+  于是**同一批错误永久静默**，除非错误内容再变一次（签名变化）。文件里另外两条链路
+  （`known_errors` 清空、all_clear 判定）都在认真区分"说过"和"送到了"，只有这处把
+  两者混为一谈。修：签名只在**收到 2xx 之后**提交；失败时不提交，下一轮（1.5s）
+  自然重试 —— 与 `push_message` 侧"宁可重试也不静默丢单"同一口径。
+- **单文件模式（`--file`）的诊断永远没有语言信息**（`desktop_pet/watcher.py`）
+  目录模式的 payload 带 `language`，`watch_single_file()` 那份漏了 —— 后端
+  `p.get('language', 'unknown')` 兜成 `'unknown'`，而 `response_generator` 会把
+  language 拼进台词（`{language}` 占位符）。同一个字段在两条路径上形状不一致，
+  以后每加一个消费方都得再猜一次。修：按 `languageId` 去重后拼好再发。
+- **`{"error_count": true}` 被念成"有 1 个错误"**（`standalone.py` / `python_backend/response_generator.py`）
+  `_as_int()` / `_as_seq()` 是裸 `int(value)`，而 `bool` 是 `int` 的子类：
+  `_as_int(True) == 1`、`_as_seq(True) == 1`。后果不只是"数错了"：一份手改坏的
+  设置文件（`"openCorpusSeq": true`）会被读成**合法序号 1**，扩展看到 `seq > 0`
+  就打开语料并回执，桌宠的首次点击反而撞上"已处理"再也不打开；`/push` 传
+  `{"count": true}` 则会冒一张红色的 errorAlert 说"1 个错误"。
+  `response_generator` 同一个位置也是 `int(context.get("error_count") or 0)` ——
+  `true` 直接变成 `errorAlert`。修：三处统一在 `int()` **之前**判 `isinstance(..., bool)`，
+  与 0.3.45 给 `_as_number()` / `parseDetectSec()` 立的口径一致（布尔不是数字）。
+- **设置文件被写坏时，点一次「检测周期」会把用户正在编辑的内容整份覆盖**（`standalone.py`）
+  `_persist_locked()` 写盘前用 `load_settings()` 合并磁盘值 —— 而它在读失败时
+  **回落默认值**，调用方分不清"文件里就是 30"和"文件坏了所以给你 30"。于是：
+  用户在编辑器里把 `~/.dsh/pets/airi-pet-settings.json` 改出一个少括号的版本（或者
+  网盘占位 / 杀软短暂锁住），此时点一次「检测周期 → 10 秒」，`disk` 变成
+  `{'detectIntervalSec': 30, 'openCorpusSeq': 0}` 再被写回磁盘 —— **用户手上那份
+  内容被换成两个键**，`openCorpusSeq` 也从真实值被打回 0。`_settings_from_disk()`
+  存在的全部意义就是区分这两种情况（0.3.45 刚加的），这里却没用它。
+  实测：`before=b'{ "detectIntervalSec": 5, "openCorpusSeq": 17'` →
+  `after=b'{ "detectIntervalSec": 10, "openCorpusSeq": 0 }'`，函数还返回 `True`。
+  修：改用严格版；**文件存在但读不出来时一个字节都不写**并返回 `False`（前端会冒
+  "周期没保存成功…再试一次？"，用户回去就能看见自己把文件写坏了）；文件不存在时
+  仍用内存快照 + 新值正常创建。
+- **POST 在途时右键，界面会被 GET 打回旧值**（`ui.html`）
+  0.3.45 给 `syncDetectSec()` 加了 `if (pendingDetectSec !== null) return;`，但那
+  只覆盖"点了但还没发出去"的 150ms 防抖窗口：防抖一到点就把 `pendingDetectSec`
+  清空，请求还在路上 —— 这段窗口里右键，GET 读到的还是**没落盘**的旧值，界面被打回
+  旧值，随后 POST 成功。结果正是 0.3.45 声称消灭的"界面说谎"：界面 30 / 磁盘 31。
+  服务端是多线程的，POST 与 GET 的完成顺序本来就不保证，判据必须是"我这边还有没落地
+  的写"。修：新增 `postInFlight` 计数（`postDetectSec` 里 +1、统一收尾 -1，
+  用 `.then(release, release)` 而不是在每个 `return` 前各减一次 —— 那个 `.then` 里有
+  三个提前 return 分支，逐分支减必然漏），`syncDetectSec` 的闸门改成
+  `pendingDetectSec !== null || postInFlight > 0`。
+  运行时证据（node 跑真实函数）：点击后 `detectSec=31`、`pendingCleared=true`、
+  `postInflight=1`，GET 返回 30 → 界面仍是 `31`（0.3.45 上是 `30`）。
+- **面板 dispose 回调不认领自己的实例**（`src/extension.ts`）
+  `panel.onDidDispose()` 回调用的是**模块级** `panel`：`indexOf(panel)` 会摘错
+  subscriptions 中的元素，而 `panel = undefined` 是无条件的 —— 一旦这个事件迟到到
+  下一个面板创建之后，就会把**新面板**抹掉，之后 `postToWebview()` 的 `if (!panel) return`
+  吞掉所有更新，面板停在一帧旧数据上却明明还开着（用户只会觉得"面板不刷新了"）。
+  修：闭包里绑定 `const created`，摘和置空都认这一个实例（`if (panel === created)`）。
+- **注释订正**：`readDetectIntervalMs` 的文档里 `None(true)` 应为 `Number(true)`。
+
 ## [0.3.45] — 2026-10-26
 
 ### Fixed
