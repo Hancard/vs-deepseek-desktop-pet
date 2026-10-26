@@ -398,14 +398,24 @@ def watch_single_file(filepath: str, port: int):
                 )
                 is_first_check = last_signature is None
                 if signature != last_signature:
-                    last_signature = signature
-                    if not (is_first_check and error_count == 0):
+                    if is_first_check and error_count == 0:
+                        last_signature = signature   # 干净启动：不推，但要记住
+                    else:
                         payload = {
                             'type': 'diagnostics',
                             'payload': {
                                 'count': error_count,
                                 'items': errors[:10],
                                 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                                # ⚠️ 单文件模式也必须带 language（0.3.46）。
+                                # 目录模式一直有，这里漏了 —— 于是 `--file` 那条
+                                # 路径的每条诊断都会让桌宠拿到 'unknown'，而
+                                # response_generator 拿 language 拼进台词
+                                # （`{language}` 占位符 → "unknown 里还有 2 个 bug"）。
+                                # 两份 payload 的形状不一致本身就是隐患。
+                                'language': (', '.join(sorted(
+                                    {e.get('languageId', '') for e in errors} - {''}
+                                )) or 'unknown'),
                             }
                         } if error_count > 0 else {
                             'trigger': 'all_clear',
