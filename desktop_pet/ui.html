@@ -2119,6 +2119,11 @@
     var settingsSeq = 0;
     var detectPostTimer = null;
     var pendingDetectSec = null;
+    /** 已发出、还没收到响应的 POST 条数（0.3.46）。
+     *  pendingDetectSec 只覆盖"点了但还没发出去"那 150ms；请求发出去之后到
+     *  响应回来之间它是 null，那段窗口里一次 GET 就能把界面打回旧值
+     *  （见 syncDetectSec 的注释）。这个计数补的正是那段。 */
+    var postInFlight = 0;
     // 上一次**确认落盘**的周期值 = 失败回滚的基准（0.3.44）。
     // 以前用"一次连点 burst 的起点"当基准（burstPrev），可只要用户停 >150ms
     // 再点，pendingDetectSec 已被清空 → 新 burst 记的"起点"是**没落盘的
@@ -2137,6 +2142,17 @@
 
     function postDetectSec(sec, prev) {
       var seq = ++settingsSeq;
+      // ⚠️ 在途计数必须在发请求**之前**加一，并且用**一个**收尾出口减回来
+      // （0.3.46）。上面那个 .then 里有三个提前 return 分支，逐个 return
+      // 前减一必然漏一个 —— 漏掉的后果是 postInFlight 永远 > 0，之后每次
+      // 右键都不会再用磁盘值对齐界面（界面对磁盘的校验彻底失效）。
+      postInFlight++;
+      var released = false;
+      var release = function() {
+        if (released) return;
+        released = true;
+        postInFlight--;
+      };
       try {
         fetch(SETTINGS_URL, {
           method: 'POST',
@@ -2165,8 +2181,9 @@
             var v = clampDetect(d.detectIntervalSec);
             if (v !== detectSec) { detectSec = v; renderDetectLabels(); repushMenuRegion(); }
           }
-        }).catch(function() { detectFailed(prev, seq); });
-      } catch (err) { detectFailed(prev, seq); }
+        }).catch(function() { detectFailed(prev, seq); })
+          .then(release, release);
+      } catch (err) { detectFailed(prev, seq); release(); }
     }
 
     function setDetectSec(sec) {
@@ -2215,7 +2232,18 @@
           // 防抖：点完 chip 立刻右键（或菜单已经开着又点了一下），GET 先回来
           // 就把乐观值打回旧值 —— 界面上数字跳一下再跳回去，而磁盘此时还没变。
           // 基准照更新（它是事实），界面留给那次待发的 POST 收尾。
-          if (pendingDetectSec !== null) { renderDetectLabels(); return; }
+          //
+          // ⚠️ 还必须算上**已经发出、还没回来**的 POST（0.3.46）。上面那个
+          // `pendingDetectSec !== null` 只覆盖"点了但没发出去"的 150ms 防抖
+          // 窗口；防抖一到点把它清空、请求还在路上，这段窗口里右键 → 这条
+          // GET 读到的是**还没落盘**的旧值 → 界面被打回旧值，而 POST 随后
+          // 成功。结果正是 0.3.45 承诺要消灭的"界面说谎"：界面 30 / 磁盘 31。
+          // 服务端是多线程的，POST 与 GET 的完成顺序本来就不保证，
+          // 所以判据必须是"我这边还有没落地的写"，不能靠时序碰运气。
+          if (pendingDetectSec !== null || postInFlight > 0) {
+            renderDetectLabels();
+            return;
+          }
           if (v !== detectSec) { detectSec = v; repushMenuRegion(); }
           renderDetectLabels();
         }).catch(function() {});
