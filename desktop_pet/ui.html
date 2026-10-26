@@ -1546,10 +1546,28 @@
       return 'desk';
     }
 
+    // 点作用参考的角色外接框（0.3.45）。
+    // 命中判定（alphaAt）在非 Live2D 时用的是 fallbackCharacterEl() 的外接框，
+    // 分区却一直用 canvas —— 而 canvas 那时候根本不存在。两处必须同一个框，
+    // 否则"点到了角色"和"点的是哪一段"永远对不上。
+    function zoneBox() {
+      if (live2d.ready && live2d.app) {
+        try { return live2d.app.canvas.getBoundingClientRect(); } catch (err) {}
+      }
+      var fb = fallbackCharacterEl();
+      if (!fb) return null;
+      try { return fb.getBoundingClientRect(); } catch (err) {}
+      return null;
+    }
+
     function zoneAt(clientY) {
-      if (!live2d.ready || !live2d.app) return 'body';
-      var rect = live2d.app.canvas.getBoundingClientRect();
-      var ry = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+      // ⚠️ 不能 `if (!live2d.ready) return 'body'`（0.3.45）。非 Live2D
+      // （LIVE2D_ENABLED=false / 素材缺失 / 半初始化失败）时角色是图片或
+      // CSS Q 版人，**照样可以点**（alphaAt 的外接框兜底就是为此写的），
+      // 可这里恒返回 'body' → click.head / click.desk 里的台词一条都触发
+      // 不到，用户写的三分之二点击分区是死的，而日志里只有 zone=body。
+      var box = zoneBox();
+      var ry = box && box.height > 0 ? (clientY - box.top) / box.height : 0.5;
       return zoneFromRatio(ry);
     }
 
@@ -1564,11 +1582,12 @@
       clickBusy = true;
       setTimeout(function() { clickBusy = false; }, 600);   // 防手抖连点
       // ry 一起上报：分区边界要是再需要校准，日志里直接有"你点的那一下
-      // 落在 canvas 的百分之几"，不用再起探针量
+      // 落在角色的百分之几"，不用再起探针量
+      // ⚠️ 走 zoneBox()（0.3.45）：非 Live2D 时 canvas 不存在，旧写法让
+      //    ryLog 恒为 -1，而"点桌子没反应"排查时最需要的就是这个数。
       var ryLog = -1;
       try {
-        var _rect = live2d.app && live2d.app.canvas &&
-                    live2d.app.canvas.getBoundingClientRect();
+        var _rect = zoneBox();
         if (_rect && _rect.height > 0) ryLog = (e.clientY - _rect.top) / _rect.height;
       } catch (err) {}
       try {
