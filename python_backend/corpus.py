@@ -320,17 +320,33 @@ _PLACEHOLDER_RE = re.compile(r'\{(\w+)\}')
 #: 也匹配不到（原样念进气泡）。两处口径都对，只是中间夹了空格。
 _PLACEHOLDER_LOOSE_RE = re.compile(r'\{\s*(\w+)\s*\}')
 
+#: 所有场景的占位符名合集（0.3.45）。_norm_placeholders 只归一**这些名字**，
+#: 见那里的注释：无条件归一会把"想原样显示的花括号"判成非法占位符。
+_ALL_PLACEHOLDER_NAMES = frozenset().union(*ALLOWED_PLACEHOLDERS.values())
+
 
 def _norm_placeholders(text):
-    """把 `{ line }` / `{line }` 收敛成 `{line}`（0.3.44）。
+    """把 `{ line }` / `{line }` 收敛成 `{line}`（0.3.44，0.3.45 收窄）。
 
     在**读入时**统一一次，后面校验与替换就都只有一种形态 —— 比在
     response_generator 里再写一遍带空格的替换安全（那里是热路径，且
     占位符缺失时还要保持"原样残留"的可见性）。
+
+    ⚠️ **只归一已知的占位符名**（0.3.45）。0.3.44 是无条件 `{ 单词 }` 一律
+    收窄，结果是：归一后 `_PLACEHOLDER_RE` 才第一次能匹配到它，而不在白名单
+    里 → **整条台词被丢弃**。于是「备注：{ 待定 }」「这个 { 名字 } 我先记下」
+    「if (a > b) { return }」这类**本来原样显示**的句子突然全没了 ——
+    用户只看到"我写的台词不生效"，dropped 只在启动日志里出现一次。
+    已知名字之外的花括号保持原样，与 0.3.43 及之前的行为一致。
     """
     if '{' not in text:
         return text
-    return _PLACEHOLDER_LOOSE_RE.sub(r'{\1}', text)
+
+    def _sub(match):
+        name = match.group(1)
+        return '{%s}' % name if name in _ALL_PLACEHOLDER_NAMES else match.group(0)
+
+    return _PLACEHOLDER_LOOSE_RE.sub(_sub, text)
 
 
 def get_all_scenes():
