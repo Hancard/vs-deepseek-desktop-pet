@@ -836,14 +836,20 @@
           // 而且没有后续纠正（要等 8 秒定时器才刷回默认图）。
           // onerror 同理：旧情绪图 404 的回调会把刚切好的新情绪打回默认图。
           var myEmotion = emotion;
+          // ⚠️ 回调里还要再认一次 `live2d.ready`（0.3.45）。上面那个 if 是在
+          // **同步发出请求时**判的，而图片加载是异步的（首次要几十~几百 ms），
+          // 这期间 initLive2D 完全可能已经接管：那时 charImg 是 display:none，
+          // 回调却无条件把它设回 block —— 不透明 PNG 垫在 canvas 底下，从模型
+          // 的透明区透出来（"两个角色叠在一起"）。0.3.42 补的是"认领自己的
+          // 情绪"，漏了"认领自己的渲染方式"。
           testImg.onload = function() {
-            if (currentEmotion !== myEmotion) return;
+            if (live2d.ready || currentEmotion !== myEmotion) return;
             charImg.src = base;
             charImg.style.display = 'block';
             cssChar.classList.remove('visible');
           };
           testImg.onerror = function() {
-            if (currentEmotion !== myEmotion) return;
+            if (live2d.ready || currentEmotion !== myEmotion) return;
             charImg.src = CHAR_IMG;
             charImg.style.display = 'block';
             cssChar.classList.remove('visible');
@@ -1084,6 +1090,15 @@
         live2dStage.classList.remove('visible');
         charBox.classList.remove('live2d-active');
         charBox.style.removeProperty('animation');
+        // ⚠️ 必须把 CSS 角色**放回来**（0.3.45）。上面 1049 行在 ready 之后
+        // 就把 cssChar 的 visible 撤了，而 showImageCharacter() 在
+        // `CHAR_IMG` 为空（用户只用 Live2D、或删掉了 assets/character*）时
+        // 第一行就 return —— 于是清场之后**没有任何角色**：只剩名牌和一片
+        // 空白，而且 fallbackCharacterEl() 返回 null → alphaAt 恒 0 →
+        // 点哪儿都没反应、连右键菜单都唤不出来（收不了场，只能杀进程）。
+        // 先把它加回来，再由 showImageCharacter() 决定是否有图要接管
+        // （它 onload 之后会再撤一次）。
+        cssChar.classList.add('visible');
         if (window.console && console.warn) {
           console.warn('[airi] Live2D unavailable, falling back to image character:', err);
         }
