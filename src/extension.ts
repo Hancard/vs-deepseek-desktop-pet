@@ -386,7 +386,7 @@ function roundHalfEven(n: number): number {
  *  桌宠侧 `float()` 不认（或反之）的写法，两边于是对同一个文件给出不同答案：
  *    · `Number('0x10')` = 16，`float('0x10')` 抛异常 → 一边 16 秒一边 30 秒；
  *    · `Number('  ')` = **0**，`float('  ')` 抛异常；
- *    · `None(true)` = **1**（0.3.44 挡掉的那半）；
+ *    · `Number(true)` = **1**（0.3.44 挡掉的那半）；
  *    · `Number(['45'])` = 45（数组带单个数字字符串）。
  *  这里改成"先按正则判形态、再转换"，与 Python 的 `_as_number` 同构。
  */
