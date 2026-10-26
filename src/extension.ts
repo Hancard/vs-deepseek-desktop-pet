@@ -866,11 +866,23 @@ function pushToStandalone(message: unknown): Promise<boolean> {
 function createOrShowAssistantPanel(context: vscode.ExtensionContext): void {
 	if (panel) { panel.reveal(vscode.ViewColumn.Beside); return; }
 
-	panel = vscode.window.createWebviewPanel(
+	// ⚠️ 回调用捕获的**这一个**实例，不要读模块级的 `panel`（0.3.46）。
+	// 两件事都取决于它：
+	//   · 从 subscriptions 里摘的必须是这个面板，否则摘错人 → 已 dispose 的
+	//     面板永远留在 subscriptions 里（每"开→关"一轮多一个）；
+	//   · 置空更要认人：dispose 事件一旦迟到到下一个面板创建之后，无条件
+	//     `panel = undefined` 会把**新面板**抹掉 → 之后 postToWebview 的
+	//     `if (!panel) return` 直接吞掉所有更新，面板从此停在一帧旧数据上，
+	//     而且它明明还开着（用户只会觉得"面板不刷新了"）。
+	// VS Code 的 dispose 事件目前是同步派发的，所以这是防御性的 —— 但本项目
+	// 已经因为"异步回调不认领自己那一次"踩过三次（拖拽起点、健康探测缓存、
+	// fileScanState 回滚），这里照同一条规矩写。
+	const created = vscode.window.createWebviewPanel(
 		'airiAssistant', 'deepseek Assistant', vscode.ViewColumn.Beside,
 		{ enableScripts: true, retainContextWhenHidden: true }
 	);
-	panel.webview.html = getWebviewHtml(STANDALONE_PORT);
+	panel = created;
+	created.webview.html = getWebviewHtml(STANDALONE_PORT);
 	// ⚠️ 面板打开时必须推一次快照（0.3.43）。
 	// 以前创建完就返回，而 HTML 里 #list 的初始内容写死的是
 	// "没有错误 — 一切正常"：工作区明明挂着十几个错误、只是没人在打字
@@ -878,20 +890,20 @@ function createOrShowAssistantPanel(context: vscode.ExtensionContext): void {
 	// 结论**，会以为已经修好了。这不是"没刷新"，是主动显示错误的安慰。
 	// 用 ready 握手而不是直接 postMessage：webview 页面还没加载完时发出去
 	// 的消息会被丢掉，只有页面自己说"我准备好了"才可靠。
-	panel.webview.onDidReceiveMessage((msg: unknown) => {
+	created.webview.onDidReceiveMessage((msg: unknown) => {
 		if ((msg as { type?: string } | undefined)?.type === 'ready') {
 			pushDiagnosticsSnapshot();
 		}
 	});
-	panel.onDidDispose(() => {
+	created.onDidDispose(() => {
 		// 顺手把自己从 subscriptions 里摘掉：不摘的话每"开→关"一轮就多留
 		// 一个已 dispose 的 WebviewPanel（连带它的 webview 资源句柄），
 		// 直到扩展停用都不会释放。
-		const i = context.subscriptions.indexOf(panel as unknown as vscode.Disposable);
+		const i = context.subscriptions.indexOf(created);
 		if (i >= 0) { context.subscriptions.splice(i, 1); }
-		panel = undefined;
+		if (panel === created) { panel = undefined; }
 	});
-	context.subscriptions.push(panel);
+	context.subscriptions.push(created);
 }
 
 function postToWebview(message: unknown): void {
