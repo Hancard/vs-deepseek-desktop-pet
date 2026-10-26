@@ -399,6 +399,11 @@ _corpus_open_lock = threading.Lock()
 #: seq -> {'event': Event, 'ok': bool, 'method': str|None}
 _corpus_open_wait = {}
 
+#: 本进程发出去过的最大序号（0.3.45）。见 do_POST 的「编辑语料」分支：
+#: 落盘失败会把内存回滚成磁盘值，只看"内存与磁盘的较大值"就会**重发同一个
+#: 序号**，从而顶掉上一个还在等回执的槽。序号只需单调，不需要等于磁盘值。
+_corpus_seq_floor = 0
+
 
 def _as_dict(value):
     """把外部 JSON 里的 payload 收敛成 dict。
@@ -1554,15 +1559,25 @@ class AiriHandler(BaseHTTPRequestHandler):
                 #    worker 白等 2.5s 后走 code 回落 → **同一个文件被打开两次**
                 #    （VS Code 里两个标签页/两个窗口）。登记必须早于发布。
                 slot = {'event': threading.Event(), 'ok': False, 'method': None}
+                global _corpus_seq_floor
                 with settings_lock:
-                    # ⚠️ 取**内存与磁盘的较大值**（0.3.44）。settings 只是启动
-                    # 时的一份快照，而这个文件明确支持用户手改（也包含"从备份/
-                    # 另一台机器恢复 ~/.dsh/pets"）：磁盘上的序号可能比内存大。
-                    # 只看内存会算出一个**更小**的序号，_persist_locked 再把它
-                    # 写进磁盘 —— 序号倒退，扩展那边 `seq <= last` 从此一律
-                    # 不接单（要一路点到旧值之上才恢复），而且被写小的值不可恢复。
+                    # ⚠️ 取**内存 / 磁盘 / 本进程已用过的最大值**再加一（0.3.45）。
+                    #
+                    # 前半（0.3.44）：settings 只是启动时的快照，而这个文件明确
+                    # 支持用户手改（也包含"从备份/另一台机器恢复 ~/.dsh/pets"），
+                    # 磁盘上的序号可能比内存大。只看内存会算出更小的序号，
+                    # 扩展那边判定"已处理"从此不接单，而且被写小的值不可恢复。
+                    #
+                    # 后半（0.3.45）：落盘失败时 _persist_locked 会把内存回滚成
+                    # 磁盘值，于是两次点击算出**同一个** seq。而下面那行是无条件
+                    # 覆盖槽位 → 前一个 worker 的槽被顶掉：扩展只回执一个 seq，
+                    # 前一个等满 2.5s 判成"没人接单"走 code 回落，同一个语料文件
+                    # 被两个程序各打开一次（正是这段注释一直在防的事）。
+                    # _corpus_seq_floor 只增不减，与"值是否真的落过盘"无关。
                     seq = max(_as_seq(settings.get('openCorpusSeq')),
-                              _as_seq(load_settings().get('openCorpusSeq'))) + 1
+                              _as_seq(load_settings().get('openCorpusSeq')),
+                              _corpus_seq_floor) + 1
+                    _corpus_seq_floor = seq
                     with _corpus_open_lock:
                         _corpus_open_wait[seq] = slot
                     # 落盘失败同样要回滚（0.3.43），理由见 _persist_locked：
