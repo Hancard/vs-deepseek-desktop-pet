@@ -738,6 +738,41 @@ def _sse_write_failed(exc, where):
 #: LLM 偶尔返回长段解释，前端会自己裁；真正要挡住的是 1MB 级的原始 body。
 MAX_PUSH_CHARS = 4000
 
+#: 前端 `switch (msg.type)` 真正认得的类型（0.3.45）。见 _as_msg_type。
+_PUSH_TYPES = frozenset({'chatMessage', 'errorAlert', 'backendExit', 'pythonMessage'})
+
+
+def _as_msg_type(value):
+    """把外部 POST 来的 type 收敛成前端认得的类型（0.3.45）。
+
+    ⚠️ 以前 `t = msg.get('type', 'chatMessage')` 只在**键缺失**时回落：
+    `{"type": null}` / `{"type": 123}` 原样进 SSE，前端第一行
+    `if (!msg || !msg.type) return;` 就把 null 丢掉、不认识的名字则在
+    switch 里落空 —— 而 HTTP 已经回了 200 `{"status":"pushed"}`。
+    从发送方看"送出去了"，从用户看"没有任何反应"，日志里两行都没有。
+    这与「收了就一定说得出话」是同一条契约（line: null 那个坑的兄弟）。
+    """
+    if isinstance(value, str) and value in _PUSH_TYPES:
+        return value
+    return 'chatMessage'
+
+
+def _as_emotion(value):
+    """情绪名归一化（0.3.45）：非字符串 / 空串 → idle，并限长。
+
+    ⚠️ 除了"前端 setEmotion 收到数字会当类名拼"这种小问题，主要原因是
+    **帧的合法性**：`{"emotion": 1e999}` 解析成 float('inf')，而
+    `json.dumps` 默认 allow_nan=True 会写出字面量 `Infinity` —— 那不是合法
+    JSON，前端 `JSON.parse` 直接抛错（被 catch 成一条 reportJS），**整条气泡
+    消失**；坏帧还留在队列里，之后每次重连按 SSE_REPLAY_COUNT 重播都再炸
+    一次。_sse_safe 只保证"能 utf-8 编码"，管不了 JSON 合法性。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text[:32]
+    return 'idle'
+
 
 def push_message(msg_type: str, text: str, emotion: str = "idle"):
     """向 SSE 客户端推送消息。超过上限时丢弃最旧的消息。
@@ -748,19 +783,34 @@ def push_message(msg_type: str, text: str, emotion: str = "idle"):
     MAX_BODY_BYTES=1MB，队列上限 MAX_QUEUE_SIZE=200 —— 最坏 ~200MB 常驻，
     而且每个 SSE 连接每次都要写 1MB（慢客户端上 wfile.write 会阻塞）。
     放在这个唯一出口上，之后新增调用方不用再记得这件事。
+
+    ⚠️ 三个字段在这里**全部归一化**（0.3.45）：type 走白名单、emotion 转
+    字符串、text 走 _as_text，并且用 `allow_nan=False` 把"帧必须能被
+    JSON.parse"变成一条硬约束 —— 出口只有一个，就在这里保证。
     """
     global _seq
+    msg_type = _as_msg_type(msg_type)
+    emotion = _as_emotion(emotion)
     try:
-        if isinstance(text, str) and len(text) > MAX_PUSH_CHARS:
-            text = text[:MAX_PUSH_CHARS] + '…（已截断）'
+        text = _as_text(text)
     except Exception:
-        text = str(text)[:MAX_PUSH_CHARS]
+        text = ''
+    if len(text) > MAX_PUSH_CHARS:
+        text = text[:MAX_PUSH_CHARS] + '…（已截断）'
+    payload = {"type": msg_type,
+               "payload": {"text": text, "emotion": emotion}}
+    try:
+        # allow_nan=False：宁可这里抛（下面有兜底），也不要写出 Infinity ——
+        # 那是"前端整条气泡消失 + 重连无限重播"的源头。
+        frame = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        frame = json.dumps({"type": 'chatMessage',
+                            "payload": {"text": '（内容无法序列化）',
+                                        "emotion": 'idle'}},
+                           ensure_ascii=False)
     with queue_lock:
         _seq += 1
-        sse_queue.append((_seq, _sse_safe(json.dumps(
-            {"type": msg_type, "payload": {"text": text, "emotion": emotion}},
-            ensure_ascii=False
-        ))))
+        sse_queue.append((_seq, _sse_safe(frame)))
         if len(sse_queue) > MAX_QUEUE_SIZE:
             del sse_queue[:len(sse_queue) - MAX_QUEUE_SIZE]
     _warn_if_js_stalled()
