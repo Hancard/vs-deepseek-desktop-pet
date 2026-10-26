@@ -349,10 +349,31 @@ def _persist_locked(key, value):
        写回去，静默覆盖掉他改的值 —— 用户看到的就是"我改的文件它不认，
        还给我改回去了"。
 
+    ③ **文件存在但读不出来时，一个字节都不写**（0.3.46）。②用的是
+       `load_settings()`，而它在读失败时**回落默认值** —— 调用方分不清
+       "文件里就是 30"和"文件坏了所以给你 30"。于是：用户在编辑器里改这个
+       文件、中途存了一个少个逗号的版本（或者网盘占位/杀掉软锁住），此时
+       点一次「检测周期 → 10 秒」，`disk` 变成 `{'detectIntervalSec': 30,
+       'openCorpusSeq': 0}` 再被写回磁盘 —— **用户手上那份正在编辑的内容
+       被整份换成了两个键**，openCorpusSeq 也从真实值被打回 0。
+       `_settings_from_disk()` 存在的全部意义就是区分这两种情况（见它的
+       docstring），这里却没用它，属于"意图与实现不匹配"。
+       现在的口径：文件不存在 → 用内存快照 + 新值创建（正常首次落盘）；
+       文件存在但解析不了 → 返回 False（内存回滚），由前端冒一句"没保存
+       成功"，用户回去就能看见自己把文件写坏了。
+
     @returns 是否落盘成功
     """
     prev = settings.get(key)
-    disk = load_settings()          # 磁盘可能是权威（用户手改过）
+    disk = _settings_from_disk()    # 严格读：读不出来返回 None，不猜
+    if disk is None:
+        if os.path.exists(SETTINGS_PATH):
+            # ⚠️ 存在却读不出来：绝不覆盖，理由见上面 ③
+            log('[airi-settings] settings file exists but is unreadable, '
+                'refusing to overwrite it (fix it or delete it): %s'
+                % SETTINGS_PATH)
+            return False
+        disk = dict(settings)       # 文件还不存在：用内存快照创建
     disk[key] = value
     settings[key] = value
     if save_settings(disk):
