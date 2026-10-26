@@ -607,9 +607,14 @@ try:
     # 这句原文，不剥会把注释本身当成违规代码（本项目的经典误伤）。
     code = '\n'.join(ln for ln in body.splitlines()
                      if not ln.strip().startswith('//'))
-    check('D1-1 判据是"相同才忽略"，不是 `<=`（关键）',
-          'seq === lastCorpusOpenSeq' in code
-          and 'seq <= lastCorpusOpenSeq' not in code, 'code=%r' % code[:200])
+    check('D1-1 判据是"变过才处理"，不是 `<=`（关键）',
+          'lastCorpusOpenSig' in code
+          and 'seq <= lastCorpusOpenSeq' not in code, 'code=%r' % code[:220])
+    # ⚠️ 0.3.45 把判据从"序号相同"升级成"(序号+mtime) 签名相同"：只比序号
+    # 会吞掉"文件被重置后恰好算出同一个号"的请求（既不打开也不回执）。
+    check('D1-1b 用签名而不是裸序号（重置后同号仍要处理）',
+          'corpusOpenSig(seq)' in code and 'sig === lastCorpusOpenSig' in code,
+          'code=%r' % code[:220])
     check('D1-2 0 与 NaN 仍然要挡（字段被删掉时不能乱开）',
           '!Number.isFinite(seq)' in code and 'seq <= 0' in code,
           'code=%r' % code[:200])
@@ -644,11 +649,13 @@ except Exception as exc:
 section('D2 detectIntervalSec: true 不能变成 1 秒')
 
 try:
-    seg = grab(ESRC, "const raw = (data as { detectIntervalSec?: unknown })",
-               'if (!Number.isFinite(sec) || sec <= 0)')
-    check('D2-0 抠到解析那段', bool(seg), 'seg=%r' % seg[:160])
-    check('D2-1 只有 number / string 才交给 Number()',
-          "typeof raw === 'string'" in seg, 'seg=%r' % seg[:200])
+    # ⚠️ 0.3.45 把这半解析搬进了 parseDetectSec（要和 Python 的 _as_number
+    #    同构），锚点跟着搬。
+    seg = grab(ESRC, 'function parseDetectSec(raw: unknown)', '\n}\n')
+    check('D2-0 抠到 parseDetectSec', bool(seg), 'seg=%r' % seg[:160])
+    check('D2-1 只有 number / 字符串才认，且字符串要过数字形态正则',
+          "typeof raw === 'string'" in seg and 'NUM_LITERAL_RE' in seg,
+          'seg=%r' % seg[:240])
 
     js = r"""
 function old(raw) { return typeof raw === 'number' ? raw : Number(raw); }
@@ -656,16 +663,21 @@ function now(raw) {
   return typeof raw === 'number' ? raw
        : (typeof raw === 'string' ? Number(raw) : NaN);
 }
-function pick(f, raw) {
+// 0.3.44 的口径：非法 → undef（保持当前）。0.3.45 起：非法 → 默认 30 秒。
+function pickOld(f, raw) {
   var s = f(raw);
   return (!isFinite(s) || s <= 0) ? 'undef' : String(s);
+}
+function pickNew(f, raw) {
+  var s = f(raw);
+  return !isFinite(s) ? 'D30' : String(s);
 }
 var cases = [['true', true], ['false', false], ['null', null], ['arr45', ['45']],
              ['str45', '45'], ['num5', 5], ['strEmpty', ''], ['obj', {}]];
 var a = [], b = [];
 cases.forEach(function (c) {
-  a.push(c[0] + ':' + pick(old, c[1]));
-  b.push(c[0] + ':' + pick(now, c[1]));
+  a.push(c[0] + ':' + pickOld(old, c[1]));
+  b.push(c[0] + ':' + pickNew(now, c[1]));
 });
 console.log('OLD=' + a.join('|'));
 console.log('NEW=' + b.join('|'));
@@ -675,9 +687,9 @@ console.log('NEW=' + b.join('|'));
     check('D2-2 node 跑通', rc == 0, 'rc=%d err=%s' % (rc, err[:200]))
     check('D2-3 旧规则里 true 变成 1 秒（这就是 bug）',
           'true:1' in (kv.get('OLD') or ''), 'OLD=%r' % kv.get('OLD'))
-    check('D2-4 新规则拒掉 true / 数组（都落到 undef = 保持当前值）',
-          'true:undef' in (kv.get('NEW') or '')
-          and 'arr45:undef' in (kv.get('NEW') or ''),
+    check('D2-4 新规则拒掉 true / 数组（落到默认值 D30，不是 1 秒）',
+          'true:D30' in (kv.get('NEW') or '')
+          and 'arr45:D30' in (kv.get('NEW') or ''),
           'NEW=%r' % kv.get('NEW'))
     check('D2-5 数字与数字字符串照旧', 'num5:5' in (kv.get('NEW') or '')
           and 'str45:45' in (kv.get('NEW') or ''), 'NEW=%r' % kv.get('NEW'))

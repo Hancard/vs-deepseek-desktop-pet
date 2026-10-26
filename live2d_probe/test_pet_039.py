@@ -339,6 +339,7 @@ var charBox = { classList: { contains: function() { return false; } }, style: {}
 %(fb)s
 %(alpha)s
 %(ratio)s
+%(zbox)s
 %(zone)s
 %(click)s
 
@@ -400,6 +401,10 @@ console.log(out.join('\n'));
        'alpha': grab('alphaAt', 'function alphaAt() { return 0; }'),
        'ratio': grab('zoneFromRatio',
                      "function zoneFromRatio() { return 'body'; }"),
+       # ⚠️ 0.3.45 把"用哪个外接框"抽成了 zoneBox()（非 Live2D 时不再恒 body）。
+       #    不一起抠就是 ReferenceError —— 而 handlePetClick 的 try/catch 会把它
+       #    吞成 CALLS=0，看着像"点角色没反应"回归（本项目经典误判）。
+       'zbox': grab('zoneBox', 'function zoneBox() { return null; }'),
        'zone': grab('zoneAt', "function zoneAt() { return 'body'; }"),
        'click': grab('handlePetClick', 'function handlePetClick() {}')}
 

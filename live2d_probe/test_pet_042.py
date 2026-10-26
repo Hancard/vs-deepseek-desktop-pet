@@ -422,25 +422,43 @@ def ts_to_js(s):
     s = re.sub(r'\)\s*:\s*[^{]*\{', ') {', s, count=1)      # 返回类型注解
     s = re.sub(r'\bas\s+(?:\{[^{}]*\}|\w+)', '', s)          # as T / as {...}
     s = re.sub(r'\bas\s+unknown', '', s)
+    # 0.3.45 新增的两个小函数带参数/变量类型注解，上面那条只管返回类型。
+    # ⚠️ 变量那条要放在 const/let→var 替换**之后**跑，否则匹配不到 `let n: number`。
+    s = re.sub(r'\((\w+):\s*[\w<>\[\]| ]+\)', r'(\1)', s)    # 参数注解
     s = s.replace('const ', 'var ').replace('let ', 'var ')
+    s = re.sub(r'(\bvar\s+\w+)\s*:\s*[A-Za-z_$][\w$]*\s*(?=[;,=)])',
+               r'\1', s)                                     # var n: number;
     return s
 
 
 try:
     fn = grab(ESRC, 'function readDetectIntervalMs(): number | undefined {',
               '\n}\n')
-    consts = '\n'.join(re.findall(r'const DETECT_\w+ = [^;]+;', ESRC))
+    # ⚠️ 0.3.45 把解析拆成了 parseDetectSec / roundHalfEven（口径要和 Python 的
+    #    _as_number + round 一致）。只抠主函数会 ReferenceError —— 而它被
+    #    函数自己的 try/catch 吞成 undefined，表现得像"所有值都返回 undefined"，
+    #    正是本项目记录过的"测试自己撒谎"第 2 条。必须一起抠。
+    fn_parse = grab(ESRC, 'function parseDetectSec(', '\n}\n')
+    fn_round = grab(ESRC, 'function roundHalfEven(', '\n}\n')
+    consts = '\n'.join(re.findall(r'const (?:NUM_LITERAL_RE|DETECT_\w+) = [^;]+;',
+                                  ESRC))
     pet_path_line = '\n'.join(re.findall(r'const PET_SETTINGS_PATH = [^;]+;',
                                          ESRC))
     check('C1-0 抠到函数', bool(fn))
+    check('C1-0a 抠到两个依赖函数（只抠主函数会 ReferenceError 被 catch 吞掉）',
+          bool(fn_parse) and bool(fn_round),
+          'parse=%d round=%d' % (len(fn_parse), len(fn_round)))
     check('C1-0b 抠到模块级常量（只抠函数会 ReferenceError）',
-          'DETECT_MIN_SEC' in consts and 'DETECT_MAX_SEC' in consts,
+          'DETECT_MIN_SEC' in consts and 'DETECT_MAX_SEC' in consts
+          and 'NUM_LITERAL_RE' in consts,
           'consts=%r' % consts[:120])
     js = r"""
 var fs = { readFileSync: function(p, e) { return FILE; } };
 var FILE = '{}';
 var PET_SETTINGS_PATH = 'x';
 __CONSTS__
+__PARSE__
+__ROUND__
 __FN__
 var out = [];
 var cases = [null, '', [], 0, false, undefined, 5, '5', 999, 'abc', 'NaN', {}];
@@ -451,7 +469,10 @@ for (var i = 0; i < cases.length; i++) {
   out.push(JSON.stringify(v) + '->' + (r === undefined ? 'undef' : r));
 }
 console.log(out.join('\n'));
-""".replace('__CONSTS__', consts).replace('__FN__', ts_to_js(fn))
+""".replace('__CONSTS__', consts)\
+   .replace('__PARSE__', ts_to_js(fn_parse))\
+   .replace('__ROUND__', ts_to_js(fn_round))\
+   .replace('__FN__', ts_to_js(fn))
     check('C1-0c TS→JS 转换没把函数削没',
           'detectIntervalSec' in ts_to_js(fn) and 'Math.max' in ts_to_js(fn))
     out, err, rc = run_node(js)
@@ -461,9 +482,14 @@ console.log(out.join('\n'));
         if '->' in line:
             k, v = line.rsplit('->', 1)
             got[k] = v
-    for bad in ('null', '""', '[]', '0', 'false', 'undefined', '{}'):
-        check('C1-2 detectIntervalSec=%s 必须返回 undefined' % bad,
-              got.get(bad) == 'undef', 'got=%r' % got.get(bad))
+    # ⚠️ 0.3.45 改了这份契约：字段**非法**不再"保持当前值"而是回落默认 30 秒
+    #    （桌宠 load_settings() 对同一个值就是回落 30，两边必须给同一个数）。
+    #    唯一仍然是 undefined 的是"文件读不到 / JSON 坏了"。
+    for bad in ('null', '""', '[]', 'false', 'undefined', '{}'):
+        check('C1-2 detectIntervalSec=%s → 默认 30 秒（不是 1 秒，也不是保持当前）'
+              % bad, got.get(bad) == '30000', 'got=%r' % got.get(bad))
+    check('C1-2b 0 按 [1,60] 夹成 1 秒（与 Python 的 max(1,...) 一致）',
+          got.get('0') == '1000', 'got=%r' % got.get('0'))
     check('C1-3 合法 5 秒照常生效', got.get('5') == '5000', 'got=%r' % got.get('5'))
     check('C1-4 字符串 "5" 照常生效', got.get('"5"') == '5000',
           'got=%r' % got.get('"5"'))

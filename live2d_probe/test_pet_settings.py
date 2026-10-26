@@ -142,7 +142,11 @@ clamp_cases = [
     ('str-number', '9', 9),
     ('float-round-up', 3.6, 4),
     ('float-round-down', 3.4, 3),
-    ('bool', True, 1),
+    # ⚠️ 布尔必须回落 30（0.3.45 改）：bool 是 int 的子类，float(True)==1.0，
+    # 旧代码于是把 `"detectIntervalSec": true`（合法 JSON）当成 **1 秒** ——
+    # 30 倍播报，而且下一次任何保存都会把这个 1 写回磁盘。
+    ('bool', True, 30),
+    ('bool-false', False, 30),
     ('garbage', 'abc', 30),
     ('none', None, 30),
     ('empty', '', 30),

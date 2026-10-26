@@ -724,9 +724,17 @@ try:
           'seg=%r' % seg[:220])
     # ⚠️ 0.3.44 改了释放方式：以前在 .then/.catch 里清，可那个 POST 的 RTT
     # 只有 10~20ms，守卫比它要防的 180ms 菜单过渡窗口还短。现在靠固定时间窗。
-    check('D4-3 用固定时间窗释放（不是请求回调——RTT 只有 20ms）',
-          'corpusOpenBusy = false; }, 700' in seg,
-          'seg=%r' % seg[:260])
+    # ⚠️ 0.3.45 把窗口从 700ms 提到 2600ms（后端 CORPUS_OPEN_ACK_TIMEOUT 是
+    # 2.5s —— 守卫短于它，慢回执时第二次点击照样进来，两个请求各自回落一次）。
+    # 断言改成"窗口 >= 2500"而不是写死具体数字。
+    _ms = 0
+    try:
+        _i = seg.find('corpusOpenBusy = false; }, ')
+        _ms = int(seg[_i + len('corpusOpenBusy = false; }, '):].split(')', 1)[0])
+    except Exception:
+        _ms = -1
+    check('D4-3 用固定时间窗释放，且 >= 后端 2.5s 回执窗口',
+          _ms >= 2500, 'ms=%r seg=%r' % (_ms, seg[:260]))
     check('D4-4 回调里不再提前释放（否则守卫形同虚设）',
           seg.count('corpusOpenBusy = false') == 1,
           'count=%d' % seg.count('corpusOpenBusy = false'))
