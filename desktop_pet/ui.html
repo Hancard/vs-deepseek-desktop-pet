@@ -2143,18 +2143,23 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ detectIntervalSec: sec })
         }).then(function(r) { return r.json(); }).then(function(d) {
-          if (seq !== settingsSeq) return;
           if (!d) { detectFailed(prev, seq); return; }
           if (isFinite(d.min)) detectMin = d.min;
           if (isFinite(d.max)) detectMax = d.max;
-          // ⚠️ 200 不等于落盘成功：save_settings 写文件失败时返回
-          // `saved:false`（比如 ~/.dsh/pets 只读、os.replace 失败）。以前
-          // 不看这个字段 → 界面显示成功，桌宠行为纹丝不动，下次右键打开
-          // 菜单又被 syncDetectSec 弹回旧值，用户以为"设置自己跳回去了"。
+          // ⚠️ "磁盘上到底是多少"是**事实**，与这次响应有没有过期无关，
+          // 所以必须在序号闸门**之前**更新（0.3.45）。以前先 `if (seq !==
+          // settingsSeq) return;` 再赋值，于是：点 +（30→31，落盘成功）→
+          // 立刻再点 +（31→32，失败）—— 第一个响应因为序号过期被丢掉，
+          // diskDetectSec 还停在 30，第二个失败就回滚到 30，而磁盘上是 31：
+          // 界面 30 / 磁盘 31 / 气泡说"没保存成功"，三个值互不相同，
+          // 正是 0.3.44 注释宣称已消灭的那种三方不一致。
+          if (d.saved !== false) {
+            diskDetectSec = isFinite(d.detectIntervalSec)
+              ? clampDetect(d.detectIntervalSec) : sec;
+          }
+          // 序号闸门只保护**界面**（回滚 / 对齐当前值），不保护磁盘事实
+          if (seq !== settingsSeq) return;
           if (d.saved === false) { detectFailed(prev, seq); return; }
-          // 落盘成功 → 这个值成为新的回滚基准（以服务端夹过的值为准）
-          diskDetectSec = isFinite(d.detectIntervalSec)
-            ? clampDetect(d.detectIntervalSec) : sec;
           // 服务端才是权威（它夹过值）：不一致就对齐回来，别让界面说谎
           if (isFinite(d.detectIntervalSec)) {
             var v = clampDetect(d.detectIntervalSec);
@@ -2205,6 +2210,12 @@
           if (!isFinite(d.detectIntervalSec)) return;
           var v = clampDetect(d.detectIntervalSec);
           diskDetectSec = v;          // 服务端读到的就是磁盘上的值 → 回滚基准
+          // ⚠️ 有待发的点击时不要覆盖用户的选择（0.3.45）。这条 GET 是**右键
+          // 打开菜单**时发的，而 setDetectSec 到真正 POST 之间还隔着 150ms
+          // 防抖：点完 chip 立刻右键（或菜单已经开着又点了一下），GET 先回来
+          // 就把乐观值打回旧值 —— 界面上数字跳一下再跳回去，而磁盘此时还没变。
+          // 基准照更新（它是事实），界面留给那次待发的 POST 收尾。
+          if (pendingDetectSec !== null) { renderDetectLabels(); return; }
           if (v !== detectSec) { detectSec = v; repushMenuRegion(); }
           renderDetectLabels();
         }).catch(function() {});
