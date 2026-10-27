@@ -129,20 +129,17 @@ export function activate(context: vscode.ExtensionContext) {
 	// watchFile 对"文件还不存在"的情况同样有效（创建时也会触发）。
 	// 「编辑语料」走的是**同一个文件**：桌宠把 openCorpusSeq 加一，
 	// 这里看到序号变大就打开语料文件并回执。
-	// 先把当前序号记为"已处理"：上一次会话里点过的请求不该在重启后被重放。
+	// 先把当前序号记为"已观察"：上一次会话里点过的请求不该在重启后被重放。
 	// ⚠️ 必须过滤 Infinity（0.3.43）：设置文件里写 `"openCorpusSeq": 1e999`
 	// 是**合法 JSON**，JSON.parse 得 Infinity，而 `Infinity || 0` 仍是
-	// Infinity —— 此后 openCorpusIfRequested 的 `seq <= lastCorpusOpenSeq`
-	// 恒真，整个会话里「编辑语料」**永远不会**走 VS Code 第一级（每次都掉到
-	// code 命令 / 系统默认程序，而 code 在已打开时会再拉一个窗口，正是三级
-	// 回落想避免的观感）。下面那条守卫用的是 Number.isFinite，两边口径必须
-	// 一致；Python 侧 _as_seq 连 OverflowError 都兜了，说明这种输入形态在
-	// 本项目里本来就是认作要防的。
+	// Infinity —— 此后 openCorpusIfRequested 的判据全部失真，整个会话里
+	// 「编辑语料」**永远不会**走 VS Code 第一级（每次都掉到 code 命令 /
+	// 系统默认程序，而 code 在已打开时会再拉一个窗口，正是三级回落想避免的
+	// 观感）。Python 侧 _as_seq 连 OverflowError 都兜了，说明这种输入形态
+	// 在本项目里本来就是认作要防的。
 	const initialCorpusSeq = Number(readCorpusOpenSeq());
-	lastCorpusOpenSeq = Number.isFinite(initialCorpusSeq) && initialCorpusSeq > 0
-		? initialCorpusSeq : 0;
-	// 启动时的签名也算"已处理"：上一次会话里点过的请求不该在重启后被重放。
-	lastCorpusOpenSig = corpusOpenSig(lastCorpusOpenSeq);
+	lastSeenCorpusSeq = (Number.isFinite(initialCorpusSeq) && initialCorpusSeq > 0)
+		? initialCorpusSeq : undefined;
 	const onPetSettingsChanged = (): void => {
 		syncPetTickFromSettings('settings file');
 		void openCorpusIfRequested();
@@ -280,28 +277,24 @@ const PET_SETTINGS_POLL_MS = 500;
 const PET_CORPUS_PATH = path.join(os.homedir(), '.dsh', 'pets',
 	'airi-pet-corpus.jsonc');
 
-/** 已经处理过的「编辑语料」请求的签名（`序号@mtimeMs`）。
+/** 最近一次**观察**到的「编辑语料」序号（undefined = 文件里没有这个键 /
+ *  读不到）。@see openCorpusIfRequested 里的判据说明。
  *
- *  ⚠️ 为什么是签名而不是只比序号（0.3.45）：序号**不是**请求的唯一身份。
- *  设置文件支持用户整份覆盖（README 教的 `Set-Content '{"detectIntervalSec":5}'`
- *  会把 openCorpusSeq 一起抹掉），桌宠重启后又从 max(内存,磁盘)+1 起算，
- *  于是可能算出一个**本会话已经用过**的号 —— 只比序号的话这种请求既不打开
- *  也不回执，桌宠白等 2.5s 再回落 code 命令（在 VS Code 已经开着时再拉一个
- *  窗口，正是三级回落要避免的观感）。反过来，"同一次写入被 watchFile 触发
- *  两遍"的两条事件序号**和** mtime 都相同 —— 用签名就同时挡住重复、放过
- *  重置。启动时用文件当前签名初始化，理由见下。 */
-let lastCorpusOpenSeq = 0;
-let lastCorpusOpenSig = '';
-
-/** 设置文件的「请求签名」：序号 + mtime（毫秒）。
+ *  ⚠️ 判据为什么是"观察值变没变"（0.3.47）。
  *
- *  mtime 用 stat 取，取不到（文件刚被删）就当 0：那一次事件本来就是"文件
- *  没了"，序号也读不出来，顶层 `seq <= 0` 会挡掉。 */
-function corpusOpenSig(seq: number): string {
-	let mtime = 0;
-	try { mtime = fs.statSync(PET_SETTINGS_PATH).mtimeMs; } catch { mtime = 0; }
-	return `${seq}@${mtime}`;
-}
+ *  设置文件里同时住着两个键（detectIntervalSec / openCorpusSeq），而
+ *  fs.watchFile 只知道"文件变了"，分不清是哪一个 —— 光看 mtime 必然误判。
+ *  "上一次观察到的序号"这一个变量就能把三种情况分开：
+ *    · 同一次写入被 watchFile 触发两遍 → 序号不变 → 忽略；
+ *    · 改了检测周期（桌宠整份写回）→ 序号不变 → 忽略；
+ *    · 文件被整份覆盖把序号抹掉（读成 undefined）→ 观察值被清成 undefined，
+ *      下次桌宠重新写入任何序号都算"变了"→ 正常打开并回执。
+ *  最后一条正是 0.3.44 的 `seq === lastCorpusOpenSeq` 漏掉的：覆盖之后桌宠
+ *  从 1 起算，而本会话可能已经用过 1 —— 既不打开也不回执，桌宠白等 2.5s
+ *  再回落 code 命令（VS Code 已经开着时再拉一个窗口）。
+ *
+ *  启动时用文件当前值初始化，"上一次会话里点过的请求"不会被重放。 */
+let lastSeenCorpusSeq: number | undefined;
 
 /** 读设置文件里的「编辑语料」请求序号；文件缺失/损坏返回 undefined。 */
 function readCorpusOpenSeq(): unknown {
@@ -322,22 +315,17 @@ function readCorpusOpenSeq(): unknown {
  */
 async function openCorpusIfRequested(): Promise<boolean> {
 	const seq = Number(readCorpusOpenSeq());
-	if (!Number.isFinite(seq) || seq <= 0) { return false; }
-	// ⚠️ 判据从"序号是否变大"改成"**签名**是否变过"（0.3.45）。
-	//
-	// 0.3.44 用的是 `seq === lastCorpusOpenSeq`（因为 `<=` 会在文件被整份覆盖、
-	// 序号被重置后连点 12 次才恢复）。但那只是把"永远不接单"换成了"同号不接单"：
-	// 桌宠重启后从 max(内存,磁盘)+1 起算，算出的号可能正好是本会话已处理过的
-	// 那个 —— 于是既不打开、也**不回执**，桌宠白等 2.5s 再回落 code 命令。
-	//
-	// 签名 = 序号 + 文件 mtime，正好把两种情况分开：
-	//   · 同一次写入被 watchFile 触发两遍 → 序号与 mtime 都相同 → 忽略；
-	//   · 序号被重置后重新写入 → mtime 必然是新的 → 正常处理。
-	// 序号本身只增不减，所以"变小"只可能来自文件被重置/替换。
-	const sig = corpusOpenSig(seq);
-	if (sig === lastCorpusOpenSig) { return false; }
-	lastCorpusOpenSig = sig;
-	lastCorpusOpenSeq = seq;
+	// 序号不可用（文件缺失 / 半截 JSON / 键被整份覆盖抹掉）：
+	// **把观察值清空**再走。清空这一步是关键 —— 覆盖之后桌宠会从 1 重新起算，
+	// 如果这里只是 return，那个 1 会和"上次会话用过的 1"撞号，请求被吞掉。
+	if (!Number.isFinite(seq) || seq <= 0) {
+		lastSeenCorpusSeq = undefined;
+		return false;
+	}
+	// 判据：序号与我**上次看到的**一样 → 这不是一次新请求（见 lastSeenCorpusSeq
+	// 的注释：同一次写入的双事件、以及"只改了检测周期"都落在这里）。
+	if (seq === lastSeenCorpusSeq) { return false; }
+	lastSeenCorpusSeq = seq;
 
 	let ok = false;
 	try {
