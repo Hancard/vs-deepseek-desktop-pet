@@ -523,8 +523,12 @@ except Exception as exc:
 section('C1 openCorpusSeq 的 Infinity')
 
 try:
-    init = grab(ESRC, 'const initialCorpusSeq = Number(readCorpusOpenSeq());',
-                '? initialCorpusSeq : 0;')
+    # 0.3.47 起初始化语句变成 `lastSeenCorpusSeq = (...) ? initialCorpusSeq : undefined;`
+    # —— 旧的结束锚点 `? initialCorpusSeq : 0;` 就不存在了。**锚点不能绑死三元表达式的
+    # 某一支**，判据只关心"这段初始化里有 Number.isFinite(initialCorpusSeq)"，所以从
+    # 语句起点向后取一段即可，仍然能抓住 0.3.42 那种 `Number(...) || 0` 放 Infinity 过去的写法。
+    _i = ESRC.find('const initialCorpusSeq = Number(readCorpusOpenSeq());')
+    init = ESRC[_i:_i + 300] if _i >= 0 else ''
     check('C1-0 找到初始化那段', bool(init), 'seg=%r' % init[:120])
     check('C1-1 用 Number.isFinite 过滤（Infinity || 0 仍是 Infinity）',
           'Number.isFinite(initialCorpusSeq)' in init, 'seg=%r' % init)

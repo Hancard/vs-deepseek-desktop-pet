@@ -608,13 +608,20 @@ try:
     code = '\n'.join(ln for ln in body.splitlines()
                      if not ln.strip().startswith('//'))
     check('D1-1 判据是"变过才处理"，不是 `<=`（关键）',
-          'lastCorpusOpenSig' in code
+          'lastSeenCorpusSeq' in code
           and 'seq <= lastCorpusOpenSeq' not in code, 'code=%r' % code[:220])
-    # ⚠️ 0.3.45 把判据从"序号相同"升级成"(序号+mtime) 签名相同"：只比序号
-    # 会吞掉"文件被重置后恰好算出同一个号"的请求（既不打开也不回执）。
-    check('D1-1b 用签名而不是裸序号（重置后同号仍要处理）',
-          'corpusOpenSig(seq)' in code and 'sig === lastCorpusOpenSig' in code,
+    # ⚠️ 0.3.45 在这里要求"(序号+mtime) 签名"，0.3.47 把它**整个删了** —— 签名
+    # 恰恰是新的 bug：桌宠改检测周期时整份写回设置文件，mtime 变而序号不变，
+    # 于是被判成"新请求"，VS Code 自己把语料文件弹出来抢焦点。判据回到
+    # "**上次观察到的序号**变没变"，函数体里不许再出现 mtime / 签名。
+    # @see live2d_probe/test_pet_047.py 的 B 段（那里用真 node 跑行为）
+    check('D1-1b 判据里不许掺 mtime（改了别的键也会变 mtime）',
+          'mtime' not in code.lower() and 'corpusOpenSig' not in code,
           'code=%r' % code[:220])
+    # 0.3.45 的"重置后同号仍要处理"现在由"序号不可用时清空观察值"保证：
+    # 覆盖后桌宠从 1 重新起算，而本会话可能已经用过 1 —— 不清空就撞号被吞。
+    check('D1-1c 序号被抹掉后要清空观察值（重置后同号仍要处理）',
+          'lastSeenCorpusSeq = undefined' in code, 'code=%r' % code[:220])
     check('D1-2 0 与 NaN 仍然要挡（字段被删掉时不能乱开）',
           '!Number.isFinite(seq)' in code and 'seq <= 0' in code,
           'code=%r' % code[:200])

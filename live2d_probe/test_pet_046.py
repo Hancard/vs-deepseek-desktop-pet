@@ -305,6 +305,34 @@ except Exception as exc:
 section('B1 推送失败时签名不许被提交')
 
 
+def _is_push_call(node):
+    """这个 Call 是不是"往桌宠推一条"的那个调用。
+
+    `_LOCAL_OPENER.open(...)` → Attribute(attr='open')；
+    `urllib.request.urlopen(...)` / `urlopen(...)` → 旧写法。
+    ⚠️ 等价 API 必须穷举：只认一种写法会让依赖它的判据退化成恒真/恒假。
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Attribute) and f.attr in ('open', 'urlopen'):
+        return True
+    return isinstance(f, ast.Name) and f.id == 'urlopen'
+
+
+def _is_sig_assign(node):
+    """`last_signature = <signature|p_sig>` 这种提交语句。
+
+    0.3.47 的值来自 pending 元组（`p_sig`），不是 `signature` —— 等价写法要穷举。
+    """
+    if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+        return False
+    if node.value.id not in ('signature', 'p_sig'):
+        return False
+    return any(isinstance(t, ast.Name) and t.id == 'last_signature'
+               for t in node.targets)
+
+
 def _sig_assigns(fn_name):
     """返回 (有签名赋值的行号列表, 有 open/urlopen 调用的行号列表)。"""
     tree = ast.parse(WSRC)
@@ -315,23 +343,40 @@ def _sig_assigns(fn_name):
             break
     if fn is None:
         return None, None
-    assigns, opens = [], []
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if (isinstance(t, ast.Name) and t.id == 'last_signature'
-                        and isinstance(node.value, ast.Name)
-                        and node.value.id == 'signature'):
-                    assigns.append(node.lineno)
-        if isinstance(node, ast.Call):
-            f = node.func
-            # `_LOCAL_OPENER.open(...)` → Attribute(attr='open')
-            # `urllib.request.urlopen(...)` / `urlopen(...)` → 旧写法，也要算作"推送点"
-            if isinstance(f, ast.Attribute) and f.attr in ('open', 'urlopen'):
-                opens.append(node.lineno)
-            elif isinstance(f, ast.Name) and f.id == 'urlopen':
-                opens.append(node.lineno)
+    assigns = [n.lineno for n in ast.walk(fn) if _is_sig_assign(n)]
+    opens = [n.lineno for n in ast.walk(fn) if _is_push_call(n)]
     return sorted(assigns), sorted(opens)
+
+
+def _sig_assigns_guarded(fn_name):
+    """`last_signature = ...` 中**受推送异常保护**的那些行号。
+
+    这才是"送达才提交"的精确判据：赋值被一个**包含 open/urlopen 调用**的 try
+    覆盖，且在那个 open 之后 —— 推送抛异常时它执行不到。两种合法实现都命中：
+      · 0.3.46：`try: ... open(...) ; last_signature = signature`（异常直接跳出）
+      · 0.3.47：`try: ... open(...) except: pass else: last_signature = p_sig`
+    0.3.45 及更早是"先提交、再推送"，赋值在 try 外面/前面 → 这里必然为空。
+    """
+    tree = ast.parse(WSRC)
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == fn_name:
+            fn = node
+            break
+    if fn is None:
+        return None
+    out = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Try):
+            continue
+        opens = [n.lineno for n in ast.walk(node) if _is_push_call(n)]
+        if not opens:
+            continue
+        lo = min(opens)
+        for inner in ast.walk(node):
+            if _is_sig_assign(inner) and inner.lineno > lo:
+                out.append(inner.lineno)
+    return sorted(out)
 
 
 try:
@@ -357,6 +402,13 @@ try:
     else:
         check('B1-2 单文件模式：签名赋值出现在推送之后', False,
               'assigns=%r opens=%r' % (a_s, o_s))
+
+    # 0.3.47：上一条只看"行号在后面"，太粗。精确判据是**受推送异常保护** ——
+    # 推送抛异常时那条赋值执行不到（无论放在 try 体末尾还是 else 分支）。
+    # 0.3.45 及更早"先提交再推送"必然为空。
+    guarded = _sig_assigns_guarded('watch_single_file')
+    check('B1-2b 单文件模式：提交受推送异常保护（抛异常时不许提交）',
+          bool(guarded), 'guarded_assigns=%r' % (guarded,))
 
     # 反向：不许有"推送前无条件提交"那种写法残留
     check('B1-3 没有 `if signature != last_signature: last_signature = signature` 的旧写法',

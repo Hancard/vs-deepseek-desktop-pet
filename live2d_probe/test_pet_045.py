@@ -536,44 +536,39 @@ except Exception as exc:
 # ===========================================================================
 # F 段：extension.ts
 # ===========================================================================
-section('F1 「编辑语料」用 (序号 + mtime) 当请求身份')
+section('F1 「编辑语料」判据：上次观察到的序号变没变')
 
 try:
     body = grab_fn(ESRC, 'async function openCorpusIfRequested(')
     check('F1-0 抠到 openCorpusIfRequested', bool(body), 'len=%d' % len(body))
     code = strip_comments(body)
-    check('F1-1 判据是签名比较（不再是 `seq === lastCorpusOpenSeq`）',
-          'sig === lastCorpusOpenSig' in code
-          and 'seq === lastCorpusOpenSeq' not in code, 'code=%r' % code[:220])
+    check('F1-1 判据是"观察值变没变"，不是 `seq <= lastCorpusOpenSeq`',
+          'seq === lastSeenCorpusSeq' in code
+          and 'seq <= lastCorpusOpenSeq' not in code, 'code=%r' % code[:220])
     check('F1-2 仍然要挡 0 与 NaN',
           '!Number.isFinite(seq)' in code and 'seq <= 0' in code)
-    check('F1-3 有 corpusOpenSig 这个身份函数',
-          bool(grab_fn(ESRC, 'function corpusOpenSig(')))
-    check('F1-4 启动时把当前签名记为"已处理"（重启后不重放上一次请求）',
-          'lastCorpusOpenSig = corpusOpenSig(' in ESRC)
-
-    sig_fn = grab_fn(ESRC, 'function corpusOpenSig(')
-    js = r"""
-var MTIME = 100;
-var fs = { statSync: function () { return { mtimeMs: MTIME }; } };
-var PET_SETTINGS_PATH = 'x';
-__SIG__
-console.log('A=' + corpusOpenSig(1));
-MTIME = 100;
-console.log('B=' + corpusOpenSig(1));
-MTIME = 200;
-console.log('C=' + corpusOpenSig(1));
-console.log('D=' + corpusOpenSig(2));
-""".replace('__SIG__', ts_to_js(sig_fn))
-    out, err, rc = run_node(js)
-    kv = kv_of(out)
-    check('F1-5 node 跑通', rc == 0, 'rc=%d err=%s' % (rc, err[:200]))
-    check('F1-6 同一序号 + 同一 mtime → 同一个签名（挡住重复的 watch 事件）',
-          kv.get('A') == kv.get('B') and kv.get('A') == '1@100',
-          'A=%r B=%r' % (kv.get('A'), kv.get('B')))
-    check('F1-7 序号相同但 mtime 变了 → 签名不同（放过"重置后恰好同号"）',
-          kv.get('C') != kv.get('A'), 'A=%r C=%r' % (kv.get('A'), kv.get('C')))
-    check('F1-8 序号变了 → 签名也不同', kv.get('D') != kv.get('C'))
+    # ⚠️ 0.3.45 的 F1-3/F1-4 要求存在 corpusOpenSig / lastCorpusOpenSig。
+    # 0.3.47 把两者**一起删了** —— 那个"序号@mtime"签名是 bug 的根源：桌宠改
+    # 检测周期时整份写回设置文件，mtime 变而序号不变 → 被判成新请求 → VS Code
+    # 自己把语料文件弹出来抢焦点。这条改成"必须已经彻底退场"。
+    # （行为验证在 live2d_probe/test_pet_047.py 的 B 段：真 node 跑 P1/P2/P2B/P3）
+    check('F1-3 签名机制已彻底退场（掺 mtime 会让改别的键也弹出）',
+          'corpusOpenSig' not in ESRC and 'lastCorpusOpenSig' not in ESRC)
+    check('F1-4 启动时把当前序号记为"已处理"（重启后不重放上一次请求）',
+          'lastSeenCorpusSeq = (Number.isFinite(initialCorpusSeq)' in ESRC)
+    # F1-5..F1-8 原本用真 node 跑 corpusOpenSig 的组合，函数没了自然要换成
+    # 对**判据本身**的三条静态性质（等价于原来覆盖的三个场景）。
+    check('F1-5 同一序号重复触发 → 忽略（挡住重复的 watch 事件）',
+          'if (seq === lastSeenCorpusSeq) { return false; }' in code,
+          'code=%r' % code[:220])
+    check('F1-6 序号不可用时清空观察值（覆盖后从 1 重新起算仍要处理）',
+          'lastSeenCorpusSeq = undefined' in code, 'code=%r' % code[:220])
+    _i_cmp = code.find('if (seq === lastSeenCorpusSeq)')
+    _i_set = code.find('lastSeenCorpusSeq = seq;')
+    check('F1-7 先比对再更新观察值（顺序反了就永远比不过）',
+          0 <= _i_cmp < _i_set, 'cmp=%d set=%d' % (_i_cmp, _i_set))
+    check('F1-8 函数体里不许出现 mtime 字样（改了别的键也会变 mtime）',
+          'mtime' not in code.lower(), 'code=%r' % code[:220])
 except Exception as exc:
     check('F1 段整体未崩', False, '%s: %s' % (type(exc).__name__, exc))
 
