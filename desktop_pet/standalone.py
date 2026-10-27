@@ -492,14 +492,19 @@ def _as_dict(value):
 
 
 def _corpus_open_ack(seq, ok, method):
-    """扩展回执入口（/event 的 corpusOpened 分支调）。@returns 是否有人等着它"""
-    try:
-        seq = int(seq)
-    except (TypeError, ValueError, OverflowError):
-        # ⚠️ OverflowError 必须一起兜：Python 的 json **默认接受**字面量
-        #    Infinity，`int(float('inf'))` 抛的正是它 —— 与 _as_seq /
-        #    clamp_detect_sec 同源的老坑，这里是第三个用 int() 的地方
-        #    （v0.3.31 补）。
+    """扩展回执入口（/event 的 corpusOpened 分支调）。@returns 是否有人等着它
+
+    ⚠️ 序号统一走 `_as_seq`（0.3.47）。以前这里是裸 `int(seq)`，于是
+    `{"seq": true}` 被读成 **1** —— 而 1 恰恰是全新安装后第一次点「编辑语料」
+    的序号。一个畸形回执会把**别人**的等待槽唤醒成 ok=True，worker 于是
+    报告"已在 VS Code 里打开"、不再走回落，而实际上没有人打开过任何文件
+    （用户点了菜单，什么也没发生，日志里却写着成功）。
+    `_as_seq` 的口径是"布尔不是序号 / 负数与畸形一律 0"，与 _as_int、
+    _as_number、response_generator 的 error_count 完全一致 —— 这条链路上
+    已经有四处各自写过判据，别再各写各的。
+    """
+    seq = _as_seq(seq)
+    if not seq:
         return False
     with _corpus_open_lock:
         slot = _corpus_open_wait.get(seq)
