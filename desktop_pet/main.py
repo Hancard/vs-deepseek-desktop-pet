@@ -17,7 +17,8 @@ import sys
 import argparse
 
 from common import (get_screen_size, get_dpi_scale, WindowAPI, load_html, start_asset_server,
-                    disable_window_backdrop, fix_window_background, win_bg_mode)
+                    disable_window_backdrop, fix_window_background, win_bg_mode,
+                    find_character_image)
 import live2d_assets
 
 
@@ -46,7 +47,8 @@ def main():
     card = live2d_assets.card_mode()
     print(f'[airi-live2d] character card {card}')
 
-    html = load_html(port, live2d=l2d_ok, silhouette=sil, card=card)
+    html = load_html(port, find_character_image(), live2d=l2d_ok,
+                     silhouette=sil, card=card)
     if not html:
         print('[airi-desktop] ERROR: cannot load ui.html, exit.')
         sys.exit(1)
@@ -57,7 +59,15 @@ def main():
 
     screen_w, screen_h = get_screen_size()
 
-    win_w, win_h = 300, 450
+    win_w, win_h = 300, 480
+    # ⚠️ 高度必须与 standalone.py 一致（0.3.47）。这里原来写的是 450，而
+    # common.move_window 的钳制兜底默认值按 480 写（注释还特意说"两处不
+    # 一致会让钳制边界差 30px"）—— standalone 也是 480，只有这个旧入口没跟上。
+    # 正常情况下窗口属性读得到，差别只在"属性取不到时按 480 兜底"这条路上
+    # 显形：那 30px 会让窗口能被多拖出屏幕 30px。
+    # 顺带：custom 立绘（AIRI_CHARACTER_IMAGE / assets/character.*）也必须
+    # 传进去 —— 只调 load_html(port, ...) 而不给 char_img，这条 documented
+    # 的功能在这个入口上是**静默失效**的（页面退化成 CSS 角色，一句提示都没有）。
     # 物理像素 -> 逻辑像素换算（窗口物理尺寸是 win_w*scale，详见 standalone.py）
     _scale = get_dpi_scale()
     x = int((screen_w - win_w * _scale - 40) / _scale)
