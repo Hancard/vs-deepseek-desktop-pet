@@ -1,5 +1,85 @@
 # Change Log
 
+## [0.3.47] — 2026-10-28
+
+### Fixed
+
+- **单文件 watcher 的"送达才提交"被外层门挡死 → 一次都不会重试**（`desktop_pet/watcher.py`）
+  0.3.46 把签名改成"收到 2xx 才提交"，但那只是必要条件。`watch_single_file()`
+  的外层门是 `if current_mtime > last_mtime:`，而 **mtime 在检查时就提交了**
+  （`last_mtime = current_mtime` 是那个 `if` 的第一行）。于是"推送失败、不提交签名"
+  之后，文件只要不再变化就永远没有下一轮 —— 注释承诺的"下一轮（1.5s）自然重试"
+  在这条路径上根本不存在。实测（先让 `--port` 指向无人在听的端口，写一次文件，
+  再起接收端，等 6 秒）：
+  ```
+  A 接收端起来后 6 秒内收到 = 0 条 -> NO RETRY        # watch_single_file
+  B 同样时序下目录模式收到         = 2 条 -> RETRY OK  # watch_directory 对照
+  ```
+  `watch_directory` 没事，因为它每轮都重算 `changed_files`，不存在这道前置门。
+  修：未送达的 `(签名, 载荷, 错误数)` 另挂 `pending`，**投递挪到外层每轮都跑**，
+  与 mtime 是否变化解耦；送达才 `last_signature = p_sig` 并清空 `pending`。
+- **改检测周期会弹出语料文件并抢焦点**（`src/extension.ts`）
+  0.3.45 把请求身份升级成 `序号@mtime` 签名。但 `fs.watchFile` 只告诉监听者
+  "文件变了"，分不清是哪个键变 —— 而桌宠点「设置检测周期」时会把整份设置文件
+  写回（`_persist_locked`），**mtime 变了、`openCorpusSeq` 一个字都没动**，扩展
+  却判成新请求：`vscode.workspace.openTextDocument(语料文件)` + `showTextDocument`，
+  用户正在写代码，编辑器突然被一个语料文件抢走焦点。实测（真 node + vscode 桩）
+  只改 `detectIntervalSec`：`RESULT_OPEN_COUNT=1`，日志紧跟着
+  `[airi-monitor] corpus open request seq=3 ok=true`。
+  修：删掉 `corpusOpenSig()` 和 `lastCorpusOpenSig`，判据回到"**上一次观察到的
+  序号**变没变"（单变量，天然分得开三种情况：同一次写入的双事件、改了别的键、
+  序号被整份覆盖抹掉后重现）。修后 P1=0（只改周期）/ P2=1（真 +1）/
+  P2B=0（同内容重写）/ P3=1（抹掉后写回同号）。
+- **保存设置时把用户自己加的键整份抹掉**（`desktop_pet/standalone.py`）
+  `_persist_locked()` 的落盘底稿来自 `_settings_from_disk()`，而它返回的是
+  **归一化后的两个已知键**（`detectIntervalSec` / `openCorpusSeq`）。用户在
+  同一个 JSON 里加的任何东西（注释性质的 `note`、自定义的 `theme` 对象……）
+  在一次保存后全部消失，且没有任何提示。实测：写入
+  `{"detectIntervalSec":30,"note":"手写的","theme":{"bg":"#123"}}` 后保存一次
+  → `note=None theme=None`。
+  修：新增 `_raw_settings_from_disk()` 拿整份原文当底稿，已知键用归一化值覆盖
+  （坏值仍然自愈），未知键原样带回。文件读坏时照旧一个字节都不写
+  （0.3.46 的 D1 不回归）。
+- **`{"seq": true}` 被当成序号 1，唤醒别人的等待槽并谎报"已打开"**
+  （`desktop_pet/standalone.py`）
+  `_corpus_open_ack()` 用裸 `int(seq)`，而 `bool` 是 `int` 的子类 →
+  `int(True) == 1`，而 **1 正是全新安装后第一次点「编辑语料」的序号**。任何
+  畸形回执（手改的测试脚本、旧版本残留）都会把那个槽 `set()` 掉，worker 以为
+  VS Code 已经打开，直接跳过"回落 `code` 命令"那一级。这是 0.3.46 立的
+  "布尔不是数量"口径的第五个入口（`_as_int` / `_as_seq` / `_as_setting` 之后
+  又漏了一个）。实测：`handled=True`、槽里的事件被 `set()`、`ok` 被改成 `True`。
+  修：改用 `_as_seq()`，`True` / 负数 / `inf` 一律不命中（真序号照旧回执）。
+- **日志把"对象缺 `type`"说成"非对象"**（`desktop_pet/standalone.py`）
+  `/event` 的处理是 `kind = msg.get('type') if isinstance(msg, dict) else None`，
+  失败分支统一记 `'ignored non-object body: %s' % type(msg).__name__`。收到
+  `{"type": null}` 时打出来的是 `non-object body: dict` —— 一句话里两个事实都错：
+  它**是**对象，缺的只是 `type`。排查时按这行去找"谁在发非对象请求"会一无所获。
+  修：拆成两种情况分别记（对象缺 `type` 时把 `type` 值和前几个键一起打出来）。
+- **旧入口 `desktop_pet/main.py` 与 standalone 的参数不一致**（`desktop_pet/main.py`）
+  两处：窗口 `win_w, win_h = 300, 450`（`standalone.py` 与 `common.move_window`
+  的钳制兜底都是 480，只有这个入口矮 30px）；`load_html(port, ...)` 的第 2 个
+  参数（立绘路径）没传 → **"情绪立绘"这条 documented 功能在这个入口上静默失效**
+  （一直显示剪影）。实测 `load_html 第 2 参数=None`、`main=(300, 450)`。
+  修：`480` + `find_character_image()`。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_047.py`（35 条）：A 段真起 HTTP sink 跑"先失败后
+  恢复"验证重试；B 段**从 `src` 现编译** `extension.js`（不复用 `out/`，否则
+  判断力验证会假通过）配 `vscode` 桩真跑 `activate()`；C/D/E 段走真 HTTP 请求
+  再看磁盘与日志；F 段用 AST 取两个入口的参数。
+- 修 `test_pet_043/044/045/046` 里**写死旧语义**的断言（0.3.45 的"签名"机制已被
+  0.3.47 删除）：043 的锚点不再绑死三元表达式的某一支；044 D1-1b 改为"函数体里
+  不许出现 mtime / `corpusOpenSig`"，并新增 D1-1c 守住"重置后同号仍要处理"；
+  045 F1 段的 node 组合测试换成对判据本身的三条静态性质（行为验证移到 047 B 段）；
+  046 新增 B1-2b：提交必须**受推送异常保护**（`try` 覆盖且在 `open` 之后），
+  在 0.3.45 上为红、0.3.46 与 0.3.47 都为绿。
+- 修 `live2d_probe/_run_all.py` 的统计口径（**本地脚本，按 `live2d_probe/.gitignore`
+  的 `_*` 规则不入库**）：它只数 `[PASS]/[FAIL]`，而 0.3.43 之后的测试改用
+  `PASS  / FAIL  `，统计表里这些行恒为 `0/0` —— 看着像全绿，实际一条断言都没
+  数到；还有一代测试（`test_window_clamp` 等）自己数、只打 `done`，对它们 `0/0`
+  才是正常的。现在两种标记格式都数，纯 rc 判据的显示 `-`。
+
 ## [0.3.46] — 2026-10-27
 
 ### Fixed
