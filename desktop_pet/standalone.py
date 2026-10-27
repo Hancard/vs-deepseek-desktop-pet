@@ -1562,8 +1562,18 @@ class AiriHandler(BaseHTTPRequestHandler):
                 # 记成 "parse failed"（v0.3.31）。/event 只收对象，直接忽略。
                 kind = msg.get('type') if isinstance(msg, dict) else None
                 if kind is None:
-                    log('[airi-standalone] /event ignored non-object body: %s'
-                        % type(msg).__name__)
+                    # ⚠️ 两种"没有 type"要分开写（0.3.47）。以前两种都记成
+                    # "non-object body: %s"（type(msg).__name__），于是
+                    # `{"type": null, ...}` 会被记成 **non-object body: dict**
+                    # —— 一句话里两个事实都错（它明明是对象，只是没有/空
+                    # type），排障时照着"非对象"去查发送方，方向从一开始就是歪的。
+                    if isinstance(msg, dict):
+                        log('[airi-standalone] /event ignored: object without '
+                            'a usable "type" (type=%r keys=%s)'
+                            % (msg.get('type'), ','.join(list(msg)[:6])))
+                    else:
+                        log('[airi-standalone] /event ignored non-object body: %s'
+                            % type(msg).__name__)
                 elif kind == 'desktopReady':
                     # 这行以前是 print —— 扩展用 stdio:'ignore' 起进程，print 全被丢掉，
                     # 于是"页面到底连上没有"在 .airi-pet.log 里毫无痕迹。必须走 log()。
