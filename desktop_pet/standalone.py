@@ -102,6 +102,10 @@ DETECT_MIN_SEC = 1        # 用户指定：最短 1 秒
 DETECT_MAX_SEC = 60       # 用户指定：最长 60 秒
 DETECT_DEFAULT_SEC = 30   # 与扩展 petTick 的默认值保持一致
 
+#: 设置文件里**本程序认得**的键。写盘时"已知键用归一化值、未知键原样保留"
+#: 就是按这个集合分的（见 _persist_locked 的 ③-b）。
+_SETTINGS_KEYS = frozenset(('detectIntervalSec', 'openCorpusSeq'))
+
 DEFAULT_PORT = 19876      # 与扩展侧 extension.ts 的默认值必须一致
 PORT_MIN = 1
 PORT_MAX = 65535
@@ -287,6 +291,24 @@ def load_settings():
     return {'detectIntervalSec': DETECT_DEFAULT_SEC, 'openCorpusSeq': 0}
 
 
+def _raw_settings_from_disk():
+    """严格读磁盘：返回**整份** dict（含用户自己加的键）；读不出来返回 None。
+
+    ⚠️ 与 `_settings_from_disk()` 的区别（0.3.47）：那个返回的是"归一化后的
+    两个已知键"，专门给"当前生效值"用；而**写盘**必须基于整份原文，否则
+    用户自己往这个文件里加的键（注释、备忘、别的工具读的字段）会在下一次
+    "顺手改个检测周期"时被整份抹掉 —— 和 0.3.46 修的"读坏了不许覆盖"是
+    同一件事的另一半：那一条防的是"文件坏了别动"，这一条防的是"文件好的
+    但内容不止两个键"。
+    """
+    try:
+        with open(SETTINGS_PATH, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _settings_from_disk():
     """严格读磁盘：读不到 / 不是对象 → None（0.3.45）。
 
@@ -295,12 +317,8 @@ def _settings_from_disk():
     要拿磁盘上的值去刷新内存，文件坏了的那一刻必须**什么都不做**（保持当前
     生效值），不能把内存里的 5 秒悄悄改成 30 秒。
     """
-    try:
-        with open(SETTINGS_PATH, encoding='utf-8') as fh:
-            data = json.load(fh)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
+    data = _raw_settings_from_disk()
+    if data is None:
         return None
     return {'detectIntervalSec': clamp_detect_sec(data.get('detectIntervalSec')),
             'openCorpusSeq': _as_seq(data.get('openCorpusSeq'))}
@@ -362,10 +380,19 @@ def _persist_locked(key, value):
        文件存在但解析不了 → 返回 False（内存回滚），由前端冒一句"没保存
        成功"，用户回去就能看见自己把文件写坏了。
 
+    ③-b **只归一化认识的键，未知键原样带回去**（0.3.47）。`_settings_from_disk`
+       返回的永远只有两个键，直接把它写回去等于：用户在文件里自己加的键
+       （备忘、给别的脚本读的字段）在他"顺手改个检测周期"时被静默删除。
+       这与上面 ③ 是同一件事的另一半 —— ③ 防"文件坏了别动"，③-b 防
+       "文件是好的，但内容不止两个键"。所以写盘用 `_raw_settings_from_disk()`
+       的整份原文打底，已知键用归一化值覆盖（坏值自愈），未知键一个字节
+       都不动。
+
     @returns 是否落盘成功
     """
     prev = settings.get(key)
-    disk = _settings_from_disk()    # 严格读：读不出来返回 None，不猜
+    raw = _raw_settings_from_disk()     # 整份原文（写盘要用它）
+    disk = _settings_from_disk()        # 严格读：读不出来返回 None，不猜
     if disk is None:
         if os.path.exists(SETTINGS_PATH):
             # ⚠️ 存在却读不出来：绝不覆盖，理由见上面 ③
@@ -374,6 +401,14 @@ def _persist_locked(key, value):
                 % SETTINGS_PATH)
             return False
         disk = dict(settings)       # 文件还不存在：用内存快照创建
+    else:
+        # ③-b（0.3.47）：把用户自己加进这个文件的键原样带回去。
+        # 只写"归一化后的两个键"等于悄悄删掉他的内容 —— 而他可能只是
+        # 顺手改了检测周期。已知键仍然以归一化值为准（坏值要自愈），
+        # 未知键一个字节都不动。
+        extra = {k: v for k, v in raw.items() if k not in _SETTINGS_KEYS}
+        if extra:
+            disk.update(extra)
     disk[key] = value
     settings[key] = value
     if save_settings(disk):
