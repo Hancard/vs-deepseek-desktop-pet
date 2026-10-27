@@ -361,10 +361,22 @@ def watch_directory(watch_dir: str, port: int):
 
 
 def watch_single_file(filepath: str, port: int):
-    """监听单个文件的变化"""
+    """监听单个文件的变化。
+
+    ⚠️ 推送失败要能重试（0.3.47）。0.3.46 把签名改成"送达之后才提交"，
+    但那只是必要条件 —— 本函数的外层门是 `current_mtime > last_mtime`，
+    而 mtime 在**检查时**就提交了。于是推送失败（桌宠还没起来 / 刚被关掉）
+    之后，文件不再变化就再也不会被检查，那个"没提交的签名"永远等不到
+    下一轮 —— 注释承诺的"下一轮重试"在这条路径上根本不存在
+    （实测：先让端口无人监听、再起接收端，6 秒内一条都收不到；
+      同样的时序下目录模式 watch_directory 会重推）。
+    所以未送达的载荷单独挂在 pending 上，**不依赖 mtime 变化**也能重投。
+    """
     push_url = f'http://127.0.0.1:{port}/push'
     last_mtime = 0
     last_signature = None
+    #: 未送达的 (签名, 载荷, 错误数)；下一轮无条件重试，送达后清空
+    pending = None
 
     ext = os.path.splitext(filepath)[1].lower()
     checker = CHECKERS.get(ext)
@@ -425,23 +437,32 @@ def watch_single_file(filepath: str, port: int):
                             'sample_errors': [],
                         }
 
-                        # ⚠️ 与目录模式同一条修正（0.3.46）：签名在**送达之后**
-                        # 才提交，否则桌宠没起来时这条播报就此永久消失。
-                        try:
-                            data = json.dumps(payload, ensure_ascii=False).encode()
-                            req = urllib.request.Request(
-                                push_url, data=data,
-                                headers={'Content-Type': 'application/json'}
-                            )
-                            with _LOCAL_OPENER.open(req, timeout=3) as resp:
-                                resp.read()
-                            last_signature = signature    # 送达才提交
-                            if error_count > 0:
-                                print(f'[watcher] {os.path.basename(filepath)}: {error_count} error(s)', flush=True)
-                            else:
-                                print(f'[watcher] {os.path.basename(filepath)}: all clear!', flush=True)
-                        except Exception:
-                            pass
+                        # 未送达就挂在 pending 上（0.3.47）—— 投递统一在下面做，
+                        # 重试不再依赖"文件又变了一次"（见函数头的说明）。
+                        pending = (signature, payload, error_count)
+
+            # ---- 投递（含重试）----
+            # 每一轮都看：失败就留着，1.5 秒后再试；成功才提交签名。
+            # 与目录模式"宁可重试也不静默丢单"同一口径。
+            if pending is not None:
+                p_sig, p_payload, p_count = pending
+                try:
+                    data = json.dumps(p_payload, ensure_ascii=False).encode()
+                    req = urllib.request.Request(
+                        push_url, data=data,
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    with _LOCAL_OPENER.open(req, timeout=3) as resp:
+                        resp.read()
+                except Exception:
+                    pass        # 桌宠服务器未运行：下一轮重试（不要清 pending）
+                else:
+                    last_signature = p_sig    # 送达才提交
+                    pending = None
+                    if p_count > 0:
+                        print(f'[watcher] {os.path.basename(filepath)}: {p_count} error(s)', flush=True)
+                    else:
+                        print(f'[watcher] {os.path.basename(filepath)}: all clear!', flush=True)
 
             time.sleep(1.5)
 
