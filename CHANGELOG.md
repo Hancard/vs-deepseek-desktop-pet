@@ -1,5 +1,68 @@
 # Change Log
 
+## [0.3.49] — 2026-10-29
+
+### Fixed
+
+- **首装后第一次「编辑语料」会白等 2.5 秒，然后多开一个 VS Code 窗口**
+  （`src/extension.ts`）
+  扩展读设置文件里的 `openCorpusSeq` 用的是裸 `Number()`，而 `Number(true)`、
+  `Number([1])`、`Number(["1"])` **全都等于 1** —— 1 恰好是全新安装后桌宠
+  第一次点「编辑语料」时写的序号。于是 `activate()` 把观察值先占成 1，那次
+  真请求被判成"序号没变"：不打开、不回执 → 桌宠白等满
+  `CORPUS_OPEN_ACK_TIMEOUT`（2.5s）→ 退回 `code` 命令 → **另开一个 VS Code
+  窗口**，气泡还写着"台词库打开了（用 code 命令）"。
+  桌宠那一侧 0.3.46 就给 `_as_seq` 立了"布尔不是序号"的口径，扩展这边
+  一直没跟上 —— 同一个判断的第四个入口。修：两端共用同一套收敛规则
+  （`coerceCorpusSeq` / `_as_seq`：拒布尔、拒数组/对象、只认十进制整数字符
+  串、`Infinity`/`NaN`/0/负数一律不算序号）。
+  实测（真 node 进程 + 独立 HOME，读 `workspace.openTextDocument` 被调次数）：
+  ```
+  场景                                修复前  修复后
+  A  "openCorpusSeq": true            0 次    1 次
+  B  "openCorpusSeq": [1]             0 次    1 次
+  C  "openCorpusSeq": ["1"]           0 次    1 次
+  D  半截 JSON 后原样存回             1 次    0 次   ← 见下一条
+  E  "openCorpusSeq": 5 被抹掉后写回   1 次    1 次   （0.3.47 的判据，不许回归）
+  F  真·新序号（对照）                 1 次    1 次
+  ```
+- **设置文件读到半截 JSON 时，把"读不出来"当成"序号被抹掉"**（`src/extension.ts`）
+  用编辑器手改 `airi-pet-settings.json` 时，文件会先被截断再写回，`fs.watchFile`
+  有整整一轮（500ms 轮询）能读到半截内容。旧代码 `catch` 里返回 `undefined`，
+  与"用户把 `openCorpusSeq` 整个删了"完全同形 → 观察值被清空 → 文件存好后
+  那个**早就处理过的旧序号**又被当成新请求 → VS Code 自己弹开语料文件抢焦点。
+  实测：写半截 JSON，再把**和原来完全一样**的内容写回去 → 打开 1 次（应 0）。
+  修：`catch` 返回专用哨兵 `CORPUS_SEQ_UNREADABLE`，命中时**直接早退且不清空
+  观察值**（早退必须在这个赋值之前，顺序反了等于白改）。
+- **旧入口 `desktop_pet/main.py` 不把检测周期传给页面**（`desktop_pet/main.py`）
+  `standalone.py` 一直传 `detect_sec=settings['detectIntervalSec']`，这个旧入口
+  漏了，于是右键菜单首帧永远显示 `load_html` 的默认 30 —— 用户把周期设成
+  5 秒，打开菜单却写着 30，要等 `GET /settings` 回来才纠正。修：同一来源
+  （`load_settings()`）取值后传下去；取不到才退回 `load_html` 自己的默认，
+  默认值仍然只有一个出处。
+
+### Docs
+
+- README「块状白」那节的 A/B 表头把 `key` 写成"默认"（`| 指标 | off | key（默认） |`），
+  与本节开头、以及环境变量表里 `dark`（默认）自相矛盾 —— 那次 A/B 的对照组是
+  `off` 与当时还在试的 `key`，默认早就改成 `dark` 了。表头更正为 `key`（实验）
+  并补一句说明。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_049.py`（22 条）。A 段查判据的结构性质，B 段
+  **从 `src/` 现编译**后真跑 `activate()`，只认 `openTextDocument` 的次数（7 个
+  场景：布尔 / 数组 / 字符串数组 / `1e999` / 只改周期 / 半截 JSON / 序号被抹掉）；
+  C 段查旧入口是否把周期传下去，并证明那个值真的改变了渲染结果。
+  判断力验证：留旧 `src/extension.ts` 跑 → **6 PASS / 9 FAIL**；单独回滚
+  `desktop_pet/main.py` → **20 PASS / 2 FAIL**（失败的正是 C1 / C1-2）；
+  修复后 **22 PASS / 0 FAIL**。
+- 三处旧断言原来绑死了实现写法，被这次重构弄红，改成断言**语义**（不是放宽）：
+  `test_pet_043.py` C1-1（初始化与运行期必须共用同一个序号归一化）、
+  `test_pet_045.py` F1-2（序号不裸用 `Number()`）、
+  `test_pet_044.py` D1-2（0 与 NaN 仍要挡 —— 内联守卫或委托给归一化函数都算，
+  委托时去函数体里确认它真的挡了）。
+
 ## [0.3.48] — 2026-10-29
 
 ### Fixed
