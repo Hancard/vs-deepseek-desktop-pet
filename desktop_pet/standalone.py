@@ -110,6 +110,25 @@ DEFAULT_PORT = 19876      # 与扩展侧 extension.ts 的默认值必须一致
 PORT_MIN = 1
 PORT_MAX = 65535
 
+#: 端口只认"十进制整数"（允许前后空白与正负号）—— 与 extension.ts 的
+#: STANDALONE_PORT 判据逐字对应（0.3.48）。
+#:
+#: ⚠️ 以前这里直接用 `int(...)`，而扩展那边用 `Number()` + `Number.isInteger`：
+#: 同一个环境变量值，两边算出**不同的端口**。实测分歧（两端各跑一次对撞）：
+#: ```
+#:   AIRI_STANDALONE_PORT    extension   standalone
+#:     '0x10'                    16         19876
+#:     '1e3'                   1000         19876
+#:     '12345.0'              12345         19876
+#: ```
+#: 后果不是"端口错了"这么轻：扩展往 A 端口推、桌宠在 B 端口听，于是状态栏
+#: 永远显示"未运行"、气泡一条都没有，而两边日志都完全正常 —— 用户以为桌宠
+#: 没启动，重启多少次都一样。int() 还认 `'1_0'`（下划线分隔，Python 3.6+
+#: 合法）这种 JS 永远算不出同一个数的写法。
+#: 这一类"两实现同一件事、口径不同"本项目已经踩过三次（_as_number /
+#: round 的银行家舍入 / 布尔的 int 子类），所以这里不再让两端各自解释。
+_PORT_RE = re.compile(r'^[+-]?\d+$')
+
 
 _port_warning = []      # resolve_port() 攒下的告警，由 flush_port_warning() 落盘
 
@@ -124,14 +143,19 @@ def resolve_port():
     住、不说话、菜单读不到设置，而日志里一条异常都没有（实测：绑 0 拿到
     2106）。扩展侧 0.3.37 已经夹过 [1,65535]，这边一直没夹 —— 两头必须
     同一口径，否则"环境变量被设了个怪值"时表现完全对不上。
+
+    ⚠️ "同一口径"包括**接受哪些写法**（0.3.48）：这里不再裸 `int()`，而是
+    与 extension.ts 共用"十进制整数"这条判据，见 _PORT_RE 的注释。
     """
-    try:
-        port = int(os.environ.get('AIRI_STANDALONE_PORT', '') or DEFAULT_PORT)
-    except (TypeError, ValueError):
+    raw = (os.environ.get('AIRI_STANDALONE_PORT') or '').strip()
+    if not raw:
+        return DEFAULT_PORT
+    if not _PORT_RE.match(raw):
         _port_warning.append(
-            'AIRI_STANDALONE_PORT=%r not an integer, fallback to %d'
+            'AIRI_STANDALONE_PORT=%r not a decimal integer, fallback to %d'
             % (os.environ.get('AIRI_STANDALONE_PORT'), DEFAULT_PORT))
         return DEFAULT_PORT
+    port = int(raw)
     if not (PORT_MIN <= port <= PORT_MAX):
         _port_warning.append(
             'AIRI_STANDALONE_PORT=%r out of range [%d..%d], fallback to %d'

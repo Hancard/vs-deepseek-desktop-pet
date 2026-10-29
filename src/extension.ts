@@ -67,10 +67,27 @@ export const supportedLanguageIds = new Set(['c', 'cpp', 'python']);
  * 不是 error 事件）。而它发生在 Promise executor 里 → Promise reject →
  * launchStandalonePet 静默失败（抛点在它唯一那个 try 之外），用户点「启动
  * 桌宠」什么都不会发生、连一条报错都没有。
+ *
+ * ⚠️ 而且必须与 Python 的 `resolve_port()` **同一个口径**（0.3.48）。
+ * 以前这里是 `Number(env)` + `Number.isInteger`，Python 那边是 `int(env)`：
+ * 同一个值两边给出**不同的端口**，而后果是全静默 —— 扩展往 A 端口推、
+ * 桌宠在 B 端口听，状态栏永远"未运行"、气泡一条都没有，两边日志都正常。
+ * 实测分歧（探针 `live2d_probe/_probe048.py` 用 node 跑这段、用 Python 跑
+ * `resolve_port()` 对撞）：
+ * ```
+ * AIRI_STANDALONE_PORT   extension  standalone
+ *   '0x10'                   16        19876
+ *   '1e3'                  1000        19876
+ *   '12345.0'             12345        19876
+ * ```
+ * 现在两边都只认"十进制整数"（允许前后空白与正负号），其余一律回落默认值。
  */
 const STANDALONE_PORT = (() => {
-	const n = Number(process.env.AIRI_STANDALONE_PORT);
-	return Number.isInteger(n) && n > 0 && n < 65536 ? n : 19876;
+	const raw = String(process.env.AIRI_STANDALONE_PORT ?? '').trim();
+	// 与 standalone.py 的 _PORT_RE 逐字对应：可选符号 + 纯十进制数字
+	if (!/^[+-]?\d+$/.test(raw)) { return 19876; }
+	const n = Number(raw);
+	return n >= 1 && n <= 65535 ? n : 19876;
 })();
 
 /** 桌宠服务器健康状态缓存（避免每次诊断变化都探测） */

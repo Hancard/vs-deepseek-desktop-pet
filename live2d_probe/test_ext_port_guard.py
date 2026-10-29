@@ -121,7 +121,13 @@ var cases = [
   ['70000',   19876, '越界（实测能触发 ERR_SOCKET_BAD_PORT）'],
   ['1.5',     19876, '小数'],
   ['19876abc', 19876, '数字混字符串（Number -> NaN）'],
-  [' 19877 ', 19877, '前后空格（Number 容忍）']
+  [' 19877 ', 19877, '前后空格（Number 容忍）'],
+  // 0.3.48：这四种写法曾经让两端算出**不同端口**（Python 那边裸 int()），
+  // 后果是全静默。现在两边共用"十进制整数"判据，一律回落默认值。
+  ['0x10',    19876, '十六进制字面量（Number -> 16，Python int() 抛）'],
+  ['1e3',     19876, '科学计数（Number -> 1000，Python int() 抛）'],
+  ['12345.0', 19876, '带小数点（Number -> 12345，Python int() 抛）'],
+  ['1_0',     19876, '下划线分隔（Python int() -> 10，Number -> NaN）']
 ];
 var bad = [], oldBad = [];
 for (var i = 0; i < cases.length; i++) {
@@ -150,7 +156,7 @@ else:
     out('  (node rc=%d) %s' % (rc, se[:300]))
 
 check('A1 node 真的跑起来了', bool(R), '输出 %r' % so[:120])
-check('A2 13 个人工构造的端口值全部落到预期（含 -1 / 99999 / 65536）',
+check('A2 所有人造端口值全部落到预期（含 -1 / 99999 / 65536 / 0x10 / 1e3）',
       R.get('bad') == [], '不符 %r' % (R.get('bad'),))
 check('A3 【反证】旧写法确实会放行越界端口（证明这条校验不是多余的）',
       len(R.get('oldBad') or []) >= 3,
@@ -206,16 +212,27 @@ out('')
 out('=' * 82)
 out('C. 静态契约 + 编译产物同步')
 
+# ⚠️ 0.3.48 起解析方式从 `Number()` + `Number.isInteger` 换成"先按正则判形态"
+#    （为了与 Python `resolve_port()` 的十进制整数判据一致）。所以这里断言的是
+#    **两条性质**而不是某一种写法：① 存在十进制形态的正则；② 存在 [1,65535]
+#    的范围比较。行为层的保证在 A2（那一组值更硬）。
 check('C1 源码里有端口范围校验',
-      re.search(r'Number\.isInteger\(n\)\s*&&\s*n\s*>\s*0\s*&&\s*n\s*<\s*65536',
-                SRC) is not None)
+      re.search(r'n\s*>=\s*1\s*&&\s*n\s*<=\s*65535', SRC) is not None
+      or re.search(r'n\s*>\s*0\s*&&\s*n\s*<\s*65536', SRC) is not None,
+      '没找到范围比较')
+check('C1-b 端口只认十进制整数（与 Python 同一口径）',
+      re.search(r'\^\[\+\-\]\?\\\\d\+\$', SRC) is not None or
+      re.search(r'\^\[\+\-\]\?\\d\+\$', SRC) is not None,
+      '没找到 ^[+-]?\\d+$ 形态判据')
 check('C2 checkStandaloneAlive 的 http.get 包在 try 里',
       re.search(r'let req[^;]*;\s*try\s*\{\s*req = http\.get', SRC) is not None)
 check('C3 catch 里 resolve(false) 后 return（不让 req.on 挂到 undefined 上）',
       re.search(r'catch\s*\{\s*resolve\(false\);\s*return;', SRC) is not None)
 check('C4 编译产物 out/extension.js 里也有端口校验（改 TS 必须 tsc）',
-      'n > 0 && n < 65536' in OUTJS,
+      '65535' in OUTJS and '19876' in OUTJS,
       'out/extension.js %d 字节' % len(OUTJS))
+check('C4-b 编译产物里也有十进制形态判据',
+      '[+-]?\\d+$' in OUTJS, 'out/extension.js 里没找到')
 check('C5 编译产物里也有 try/catch 兜底',
       'resolve(false);' in OUTJS and 'return;' in OUTJS)
 check('C6 没有残留旧的裸写法',
