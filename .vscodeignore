@@ -16,6 +16,11 @@ live2d_probe/**
 **/*.log
 desktop_pet/_clamp_test.txt
 desktop_pet/_probe_*.html
+# 本地探针目录（temp_049/ 这类）在 .gitignore 里是 `temp_*/`，而 vsce **不看**
+# .gitignore —— 0.3.49 打包时实测把一个 52KB 的探针目录（含各场景的 home_*
+# 临时 HOME 和 node_modules 桩）打进了 VSIX。它们只在开发机存在，但"忘删一次
+# 就随包发出去"没有理由接受。
+temp_*/
 *.vsix
 # Live2D Cubism Core 是**专有许可，不可再分发**（.gitignore 里也排除了它，
 # 模块头 live2d_assets.py 也写着同样的约束）—— vsce 只认 .vscodeignore，
