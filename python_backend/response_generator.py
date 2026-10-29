@@ -89,6 +89,33 @@ def _nvl(value, fallback="?"):
     return value
 
 
+def _as_language(value, fallback="python"):
+    """把语言的标签收敛成"能念给人听"的短字符串（0.3.50）。
+
+    ⚠️ 这是 `_nvl` 同一个坑的第三个入口。`{language}` 占位符在语料里是真在用的
+    （syntax_error 9 条里 2 条、type_error 8 条里 1 条），而 `context` 是
+    外部 `/push` 写的：
+
+        {"count": 3, "sample_errors": [...], "language": null}
+
+    以前只写 `context.get("language", "python")` —— 默认值**只在键不存在时**
+    生效，键存在而值是 null 时拿到 None，气泡于是念出
+
+        "None的语法不难吧？你怎么还能写错啊…"
+        "缩进都能错，你是用记事本在写 ['py'] 吗？"   ← 传数组时
+
+    实测（真调 generate_response，每个用例 6 次抽样）：null / "" / 123 /
+    ["py"] 四种输入里有三种撞出了畸形台词。
+    口径：**是字符串就用（去掉首尾空白），其余一律回落默认值** —— 与
+    "键不存在"给出同一个答案，这样"没写语言"和"语言写了但是 null"不会再分叉。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return fallback
+
+
 _last_pick = {}
 
 
@@ -247,7 +274,11 @@ def generate_response(context: dict) -> dict:
     context["error_count"] = error_count
     if not isinstance(context.get("files"), (list, tuple)):
         context["files"] = []
-    language = context.get("language", "python")
+    # ⚠️ language 也必须归一化并回写（0.3.50）：见 _as_language 的注释 ——
+    # null / 数字 / 数组会原样拼进 `{language}` 占位符，气泡念出 "None的语法…"。
+    # 回写的理由与 error_count 相同：try_deepseek_api 读的是 context 里的原始值。
+    language = _as_language(context.get("language"))
+    context["language"] = language
     # sample_errors 元素不一定是 dict（外部 /push 可传字符串数组），
     # 统一归一化成 dict，categorize_errors / try_deepseek_api 都按 dict 消费
     # 外部输入不可信：sample_errors 传标量（数字/布尔）时 `for e in raw`
