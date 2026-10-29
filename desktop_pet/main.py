@@ -47,8 +47,22 @@ def main():
     card = live2d_assets.card_mode()
     print(f'[airi-live2d] character card {card}')
 
+    # 检测周期的**权威值**在 standalone 的设置文件里（右键菜单改的就是它），
+    # 这里只用于菜单首帧渲染。以前这个旧入口没传 detect_sec，于是首帧菜单
+    # 永远显示 load_html 的默认 30 —— 用户把周期设成 5 秒，右键打开的菜单却
+    # 写着 30，要等菜单打开后 GET /settings 复核才被纠正（0.3.49）。
+    #
+    # 用 kwargs 而不是直接写 `detect_sec=30` 兜底：默认值只该有一个出处
+    # （load_html 的签名）。import 失败就不传，让那个默认生效。
+    detect_kwargs = {}
+    try:
+        from standalone import load_settings
+        detect_kwargs['detect_sec'] = load_settings()['detectIntervalSec']
+    except Exception as exc:  # 读不到设置不该让窗口起不来
+        print(f'[airi-desktop] WARNING: settings unavailable, using default: {exc!r}')
+
     html = load_html(port, find_character_image(), live2d=l2d_ok,
-                     silhouette=sil, card=card)
+                     silhouette=sil, card=card, **detect_kwargs)
     if not html:
         print('[airi-desktop] ERROR: cannot load ui.html, exit.')
         sys.exit(1)
