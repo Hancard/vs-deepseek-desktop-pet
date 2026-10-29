@@ -523,15 +523,18 @@ except Exception as exc:
 section('C1 openCorpusSeq 的 Infinity')
 
 try:
-    # 0.3.47 起初始化语句变成 `lastSeenCorpusSeq = (...) ? initialCorpusSeq : undefined;`
-    # —— 旧的结束锚点 `? initialCorpusSeq : 0;` 就不存在了。**锚点不能绑死三元表达式的
-    # 某一支**，判据只关心"这段初始化里有 Number.isFinite(initialCorpusSeq)"，所以从
-    # 语句起点向后取一段即可，仍然能抓住 0.3.42 那种 `Number(...) || 0` 放 Infinity 过去的写法。
-    _i = ESRC.find('const initialCorpusSeq = Number(readCorpusOpenSeq());')
+    # 0.3.49 起初始化改成 `const initialCorpusSeq = coerceCorpusSeq(readCorpusOpenSeq());`
+    # —— 裸 `Number(...)` 会把 `true` / `[1]` / `["1"]` 都强转成序号 **1**（而 1
+    # 正是首装后第一次点「编辑语料」的序号，那次请求会被"序号没变"挡掉）。
+    # 判据仍然只关心"初始化这段走了同一套归一化"，**不绑死具体写法**：从语句起点
+    # 向后取一段，断言这里出现了 coerceCorpusSeq、且不再有裸 Number 的形状。
+    # （Infinity 的行为验证在 test_pet_049.py 的场景里：init=1e999 → 桌宠写 1 → 必须打开）
+    _i = ESRC.find('const initialCorpusSeq = coerceCorpusSeq(readCorpusOpenSeq());')
     init = ESRC[_i:_i + 300] if _i >= 0 else ''
     check('C1-0 找到初始化那段', bool(init), 'seg=%r' % init[:120])
-    check('C1-1 用 Number.isFinite 过滤（Infinity || 0 仍是 Infinity）',
-          'Number.isFinite(initialCorpusSeq)' in init, 'seg=%r' % init)
+    check('C1-1 初始化与运行期共用同一个序号归一化（Infinity / 布尔 / 数组都不认）',
+          'coerceCorpusSeq' in init and 'Number(readCorpusOpenSeq())' not in ESRC,
+          'seg=%r' % init)
     check('C1-2 不再有 `Number(readCorpusOpenSeq()) || 0` 这种写法',
           'Number(readCorpusOpenSeq()) || 0' not in ESRC)
 

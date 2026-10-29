@@ -622,9 +622,19 @@ try:
     # 覆盖后桌宠从 1 重新起算，而本会话可能已经用过 1 —— 不清空就撞号被吞。
     check('D1-1c 序号被抹掉后要清空观察值（重置后同号仍要处理）',
           'lastSeenCorpusSeq = undefined' in code, 'code=%r' % code[:220])
+    # ⚠️ 判据不能认死一种写法（0.3.49）：那之后"非有限数 / 0 / 负数一律挡掉"
+    # 从函数体挪进了 coerceCorpusSeq()（顺带把布尔、数组、字符串也收口了）。
+    # 所以两条路都算数 —— 内联守卫，或**委托给归一化函数且它真的挡了 0/NaN**。
+    # 只认内联写法的话，任何一次重构都会让这条断言变成"必然不成立"，
+    # 而那并不代表缺陷回归。
+    _inline_guard = '!Number.isFinite(seq)' in code and 'seq <= 0' in code
+    _coerce = grab_fn(ESRC, 'function coerceCorpusSeq(')
+    _delegated = ('coerceCorpusSeq(' in code
+                  and 'Number.isInteger' in _coerce and '> 0' in _coerce)
     check('D1-2 0 与 NaN 仍然要挡（字段被删掉时不能乱开）',
-          '!Number.isFinite(seq)' in code and 'seq <= 0' in code,
-          'code=%r' % code[:200])
+          _inline_guard or _delegated,
+          'inline=%s delegated=%s coerce=%r'
+          % (_inline_guard, _delegated, _coerce[:160]))
 
     js = r"""
 function oldRule(seq, last) { return !(isFinite(seq) && seq > last); }

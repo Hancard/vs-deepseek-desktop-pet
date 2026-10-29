@@ -147,16 +147,15 @@ export function activate(context: vscode.ExtensionContext) {
 	// 「编辑语料」走的是**同一个文件**：桌宠把 openCorpusSeq 加一，
 	// 这里看到序号变大就打开语料文件并回执。
 	// 先把当前序号记为"已观察"：上一次会话里点过的请求不该在重启后被重放。
-	// ⚠️ 必须过滤 Infinity（0.3.43）：设置文件里写 `"openCorpusSeq": 1e999`
-	// 是**合法 JSON**，JSON.parse 得 Infinity，而 `Infinity || 0` 仍是
-	// Infinity —— 此后 openCorpusIfRequested 的判据全部失真，整个会话里
-	// 「编辑语料」**永远不会**走 VS Code 第一级（每次都掉到 code 命令 /
-	// 系统默认程序，而 code 在已打开时会再拉一个窗口，正是三级回落想避免的
-	// 观感）。Python 侧 _as_seq 连 OverflowError 都兜了，说明这种输入形态
-	// 在本项目里本来就是认作要防的。
-	const initialCorpusSeq = Number(readCorpusOpenSeq());
-	lastSeenCorpusSeq = (Number.isFinite(initialCorpusSeq) && initialCorpusSeq > 0)
-		? initialCorpusSeq : undefined;
+	// ⚠️ 归一化必须与运行期**同一个函数**（0.3.49，见 coerceCorpusSeq）：
+	// 以前这里是裸 `Number(...)`，于是 `"openCorpusSeq": true`（手改坏的设置
+	// 文件）被读成 **1** —— 而 1 正是全新安装后第一次点「编辑语料」的序号，
+	// 观察值先被占掉，那一次真请求就被"序号没变"挡掉：不打开、不回执 →
+	// 桌宠白等 2.5 秒 → `code` 回落 → **多开一个 VS Code 窗口**，气泡还说
+	// "台词库打开了（用 code 命令）"。`Number([1])` / `Number(["1"])` 同理。
+	// 顺带也把 0.3.43 挡下的 Infinity 一起收了（`"openCorpusSeq": 1e999`）。
+	const initialCorpusSeq = coerceCorpusSeq(readCorpusOpenSeq());
+	lastSeenCorpusSeq = initialCorpusSeq;
 	const onPetSettingsChanged = (): void => {
 		syncPetTickFromSettings('settings file');
 		void openCorpusIfRequested();
@@ -295,7 +294,7 @@ const PET_CORPUS_PATH = path.join(os.homedir(), '.dsh', 'pets',
 	'airi-pet-corpus.jsonc');
 
 /** 最近一次**观察**到的「编辑语料」序号（undefined = 文件里没有这个键 /
- *  读不到）。@see openCorpusIfRequested 里的判据说明。
+ *  序号不可用）。@see openCorpusIfRequested 里的判据说明。
  *
  *  ⚠️ 判据为什么是"观察值变没变"（0.3.47）。
  *
@@ -304,24 +303,78 @@ const PET_CORPUS_PATH = path.join(os.homedir(), '.dsh', 'pets',
  *  "上一次观察到的序号"这一个变量就能把三种情况分开：
  *    · 同一次写入被 watchFile 触发两遍 → 序号不变 → 忽略；
  *    · 改了检测周期（桌宠整份写回）→ 序号不变 → 忽略；
- *    · 文件被整份覆盖把序号抹掉（读成 undefined）→ 观察值被清成 undefined，
+ *    · 文件被整份覆盖把序号抹掉（解析成功、键没了）→ 观察值清成 undefined，
  *      下次桌宠重新写入任何序号都算"变了"→ 正常打开并回执。
  *  最后一条正是 0.3.44 的 `seq === lastCorpusOpenSeq` 漏掉的：覆盖之后桌宠
  *  从 1 起算，而本会话可能已经用过 1 —— 既不打开也不回执，桌宠白等 2.5s
  *  再回落 code 命令（VS Code 已经开着时再拉一个窗口）。
  *
+ *  ⚠️ 而"文件读不出来"**不在这三条里**（0.3.49）：那是"什么都没看到"，
+ *  观察值必须原样留着，否则用户手改设置文件时的一次瞬时半截 JSON 就会让
+ *  存好之后的旧序号被当成新请求（VS Code 自己弹开语料文件）。见
+ *  CORPUS_SEQ_UNREADABLE。
+ *
  *  启动时用文件当前值初始化，"上一次会话里点过的请求"不会被重放。 */
 let lastSeenCorpusSeq: number | undefined;
 
-/** 读设置文件里的「编辑语料」请求序号；文件缺失/损坏返回 undefined。 */
+/** `readCorpusOpenSeq()` 的"什么都没看到"哨兵（0.3.49）。
+ *
+ *  ⚠️ 必须与"解析成功但没有可用序号"分开。两者以前都是 undefined，于是
+ *  **用户正在手改设置文件**（编辑器先截断再写，那一瞬间是空文件/半截 JSON）
+ *  被当成"序号被抹掉了" → 观察值清空 → 用户存好之后，同一个旧序号被当成
+ *  **新请求**，VS Code 自己把语料文件弹出来（用户根本没点菜单）。
+ *  实测（临时 HOME + 从 src 现编译 + 真跑 activate）：半截 JSON → 再存回
+ *  与原内容**完全相同**的一版 → 打开 1 次（应 0 次）。
+ *  而"序号被整份覆盖抹掉"（解析成功、键没了）必须照旧清空观察值 —— 那是
+ *  0.3.47 的判据，覆盖之后桌宠从 1 重新起算，不清空就永远撞号。 */
+const CORPUS_SEQ_UNREADABLE = Symbol('corpusSeqUnreadable');
+
+/** 读设置文件里的「编辑语料」请求序号。
+ *
+ *  @returns 原始值（交给 `coerceCorpusSeq` 归一化）；文件不存在 / 读到半截
+ *  JSON / 顶层不是对象时返回 `CORPUS_SEQ_UNREADABLE`（≠ 键被抹掉）。 */
 function readCorpusOpenSeq(): unknown {
+	let data: unknown;
 	try {
-		const data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8')) as
-			{ openCorpusSeq?: unknown };
-		return data?.openCorpusSeq;
+		data = JSON.parse(fs.readFileSync(PET_SETTINGS_PATH, 'utf8'));
 	} catch {
-		return undefined;
+		return CORPUS_SEQ_UNREADABLE;
 	}
+	// 顶层不是对象：桌宠那侧的 _raw_settings_from_disk() 也判成"读不出来"
+	// （返回 None → 拒绝写盘），两边同为"这份文件不可用"，不当作"键被抹掉"。
+	if (!data || typeof data !== 'object' || Array.isArray(data)) {
+		return CORPUS_SEQ_UNREADABLE;
+	}
+	return (data as { openCorpusSeq?: unknown }).openCorpusSeq;
+}
+
+/** 把设置文件里的序号归一化成可用的正整数；不可用返回 undefined。
+ *
+ *  口径**逐条对齐** `standalone._as_seq`（0.3.47 起那边就是"布尔不是序号"）：
+ *    · **布尔不是序号**：`Number(true)` 是 **1**，而 1 正是全新安装后第一次
+ *      点「编辑语料」的序号 —— 扩展把观察值记成 1、桌宠下一次请求又叫 1，
+ *      于是被"序号没变"挡掉：不打开、不回执 → 桌宠白等 2.5 秒 → `code`
+ *      回落 → 多开一个 VS Code 窗口。桌宠侧 `_as_seq(true)` 是 0（下一次
+ *      请求就是 1），两边对同一个文件给出不同答案，正是这个 bug 的形状。
+ *    · **数组/对象不认**：`Number([1])`、`Number(["1"])` 也是 1，同一个坑。
+ *    · **非整数不认**：1.5 在 Python 侧被 `int()` 截成 1，两边各算各的。
+ *    · **十进制字符串照认**：与 Python 的 `int("5")` 一致（手改文件时常见）。
+ *  实测三种写法（真 node 跑扩展，看 openTextDocument 被调了几次）：
+ *  `true` / `[1]` / `["1"]` 各让第一次「编辑语料」打空（0 次，应 1 次）。 */
+function coerceCorpusSeq(raw: unknown): number | undefined {
+	if (typeof raw === 'boolean') { return undefined; }
+	if (typeof raw === 'number') {
+		return Number.isInteger(raw) && raw > 0 ? raw : undefined;
+	}
+	if (typeof raw === 'string') {
+		const text = raw.trim();
+		if (!/^[+-]?\d+$/.test(text)) { return undefined; }
+		const n = Number(text);
+		// 超出安全整数范围的字符串会被 Number() 舍成别的值（1e20 之类），
+		// 与其拿一个近似值去比对，不如当它不可用。
+		return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+	}
+	return undefined;
 }
 
 /** 设置文件变了 → 看看是不是桌宠点了「编辑语料」。
@@ -331,11 +384,17 @@ function readCorpusOpenSeq(): unknown {
  *  打开之后必须**回执**给桌宠 —— 它正等这个信号来决定要不要往下回落。
  */
 async function openCorpusIfRequested(): Promise<boolean> {
-	const seq = Number(readCorpusOpenSeq());
-	// 序号不可用（文件缺失 / 半截 JSON / 键被整份覆盖抹掉）：
+	const raw = readCorpusOpenSeq();
+	// ⚠️ 读不出来 ≠ 序号被抹掉（0.3.49）。读不出来意味着**我们什么都没看到**
+	// （文件不存在，或用户正在编辑器里改、那一瞬间是半截 JSON）—— 观察值
+	// 必须原样留着。以前两种都按 undefined 处理，于是"手改设置文件"会让
+	// 扩展把存好之后读到的旧序号当成新请求，**自己把语料文件弹出来**。
+	if (raw === CORPUS_SEQ_UNREADABLE) { return false; }
+	const seq = coerceCorpusSeq(raw);
+	// 解析成功但序号不可用（键被整份覆盖抹掉 / 0 / 布尔 / 数组 / 坏值）：
 	// **把观察值清空**再走。清空这一步是关键 —— 覆盖之后桌宠会从 1 重新起算，
 	// 如果这里只是 return，那个 1 会和"上次会话用过的 1"撞号，请求被吞掉。
-	if (!Number.isFinite(seq) || seq <= 0) {
+	if (seq === undefined) {
 		lastSeenCorpusSeq = undefined;
 		return false;
 	}

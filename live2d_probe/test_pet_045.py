@@ -545,8 +545,14 @@ try:
     check('F1-1 判据是"观察值变没变"，不是 `seq <= lastCorpusOpenSeq`',
           'seq === lastSeenCorpusSeq' in code
           and 'seq <= lastCorpusOpenSeq' not in code, 'code=%r' % code[:220])
-    check('F1-2 仍然要挡 0 与 NaN',
-          '!Number.isFinite(seq)' in code and 'seq <= 0' in code)
+    # F1-2 原本断言"挡 0 与 NaN"的具体写法（`!Number.isFinite(seq) || seq <= 0`）。
+    # 0.3.49 把归一化收进 coerceCorpusSeq（与 standalone._as_seq 同口径），
+    # 所以判据换成**本质**：序号不许裸用 Number() 强转 —— `Number(true)` 是 1、
+    # `Number([1])` 也是 1，而 1 正是首装后第一次请求的序号（那次会被挡掉，
+    # 桌宠白等 2.5s 后回落 code，多开一个窗口）。行为验证在 test_pet_049.py。
+    check('F1-2 序号不裸用 Number()（布尔/数组会被强转成合法序号）',
+          'Number(readCorpusOpenSeq())' not in code
+          and 'coerceCorpusSeq(' in code, 'code=%r' % code[:220])
     # ⚠️ 0.3.45 的 F1-3/F1-4 要求存在 corpusOpenSig / lastCorpusOpenSig。
     # 0.3.47 把两者**一起删了** —— 那个"序号@mtime"签名是 bug 的根源：桌宠改
     # 检测周期时整份写回设置文件，mtime 变而序号不变 → 被判成新请求 → VS Code
@@ -554,8 +560,11 @@ try:
     # （行为验证在 live2d_probe/test_pet_047.py 的 B 段：真 node 跑 P1/P2/P2B/P3）
     check('F1-3 签名机制已彻底退场（掺 mtime 会让改别的键也弹出）',
           'corpusOpenSig' not in ESRC and 'lastCorpusOpenSig' not in ESRC)
+    # F1-4 原本绑的是 `lastSeenCorpusSeq = (Number.isFinite(initialCorpusSeq)` 这一行。
+    # 0.3.49 把初始化拆成"先归一化、再赋值"（读不出来时保持 undefined），
+    # 所以断言改成这条**语义**本身：启动时确实把当前序号记成了观察值。
     check('F1-4 启动时把当前序号记为"已处理"（重启后不重放上一次请求）',
-          'lastSeenCorpusSeq = (Number.isFinite(initialCorpusSeq)' in ESRC)
+          'lastSeenCorpusSeq = initialCorpusSeq' in ESRC)
     # F1-5..F1-8 原本用真 node 跑 corpusOpenSig 的组合，函数没了自然要换成
     # 对**判据本身**的三条静态性质（等价于原来覆盖的三个场景）。
     check('F1-5 同一序号重复触发 → 忽略（挡住重复的 watch 事件）',
