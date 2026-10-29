@@ -191,7 +191,18 @@ def flush_port_warning():
 #:     0.3.44 只在扩展侧挡了这半（`readDetectIntervalMs`），桌宠自己
 #:     `load_settings()` 仍读成 1，而且下一次任何保存都会把这个 1 写回磁盘。
 #: 统一成"先照这个正则判形态，再转换"，两边才可能真正一致。
-_NUM_RE = re.compile(r'[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?')
+#:
+#: ⚠️ 数字类必须写 `[0-9]` 而**不是** `\d`（0.3.50）。Python 的 `re` 对 str
+#: 模式的 `\d` 是 Unicode 感知的（匹配 Nd 类的**所有**十进制数字），而 JS 的
+#: `\d` 恒为 ASCII。于是 `"detectIntervalSec": "٥"`（阿拉伯-印度数字 5）、
+#: `"５"`（全角）、`"५"`（天城文）这些值：`float()` 真的能转成 5.0，两边却
+#: 一个认一个不认 —— 桌宠按 5 秒跑、`GET /settings` 也回 5，而扩展按 30 秒跑。
+#: 菜单写着 5 秒、实际 30 秒，正是 0.3.45 立这个正则要消灭的那种不一致。
+_NUM_RE = re.compile(r'[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?')
+
+#: 序号的形态：与扩展侧 `coerceCorpusSeq` 的 `/^[+-]?\d+$/` **逐字对应**
+#: （ASCII 数字、可选正负号、整串匹配）。见 `_as_seq` 的注释。
+_SEQ_RE = re.compile(r'[+-]?[0-9]+')
 
 
 def _as_number(value):
@@ -291,12 +302,36 @@ def _as_seq(value):
     序号 1**：扩展那边 `seq > 0` 成立 → 打开语料并回执，桌宠的首次点击反而
     撞上"已处理"再也不打开。0.3.45 给 `_as_number` 立的口径是"布尔不是数字"，
     这里是同一个判断的另两个入口（`_as_int` 同理），不能各写各的。
+
+    ⚠️ 口径必须与扩展侧 `coerceCorpusSeq()` **逐条相同**（0.3.50）。
+    这个函数原来只有"布尔 → 0"一条约束，剩下交给 `int()`，于是有三处与 JS
+    对不上（实测见 test_pet_050 的 A 段，逐值对撞）：
+      · `int("٥")` == 5（Unicode 数字），而 JS 正则的 digit 类只认 ASCII → 扩展
+        那边判成"不是序号"，桌宠这边当成 5。两边对同一个文件给出不同答案。
+      · `int("１２３")` == 123（全角），同上。
+      · `int(2.9)` == 2 —— 扩展要求 `Number.isInteger`，小数一律不认。
+    这三条今天都没有用户可见症状（序号只用来判"变没变"，差一个数下次请求
+    照样能打开），但"同一个值两边算出不同序号"正是 0.3.49 那个多开窗口的
+    形状；留着它们，下次谁把序号接进别的逻辑就会开花。这里一次收干净。
     """
     if isinstance(value, bool):
         return 0
-    try:
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, float):
+        # 与 Number.isInteger 对齐：2.9 / inf / nan 都不是"序号"
+        if not value.is_integer():
+            return 0
         n = int(value)
-    except (TypeError, ValueError, OverflowError):
+    elif isinstance(value, str):
+        text = value.strip()
+        if not _SEQ_RE.fullmatch(text):
+            return 0
+        try:
+            n = int(text)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    else:
         return 0
     return n if n > 0 else 0
 
