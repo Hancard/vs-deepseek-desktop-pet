@@ -595,12 +595,20 @@ def _corpus_release(seq, slot):
             _corpus_open_wait.pop(seq, None)
 
 
-def _open_corpus_worker(seq, slot=None):
+def _open_corpus_worker(seq, slot=None, published=True):
     """后台线程：确保文件存在 → 等扩展回执 → 没等到就逐级回落 → 说一句结果。
 
     slot 允许由 /settings 处理器**预先登记好**再传进来（顺序理由见那里：
     登记必须早于"落盘发布"）。传 None 时本函数自己登记 —— 直接调用它的
     测试/脚本走这条路。
+
+    published=False 表示"序号没能落盘，请求根本没有发布给扩展"（0.3.48）：
+    设置文件存在但读不出来时 `_persist_locked` 会拒绝覆盖并返回 False，
+    扩展永远看不到新序号、也就不可能回执。这种情况下**不能再等**
+    CORPUS_OPEN_ACK_TIMEOUT —— 白等 2.5 秒之后照样走 `code` 回落，而
+    `code` 在 VS Code 已经开着时会再拉一个窗口（正是三级回落要避免的观感），
+    用户这边则是"点了、卡两三秒、然后莫名其妙多一个窗口"，一句解释都没有。
+    所以直接摘槽 + 立刻回落，并在气泡里说明原因。
     """
     path = None
     try:
@@ -620,10 +628,18 @@ def _open_corpus_worker(seq, slot=None):
         slot = {'event': threading.Event(), 'ok': False, 'method': None}
         with _corpus_open_lock:
             _corpus_open_wait[seq] = slot
-    try:
-        got = slot['event'].wait(CORPUS_OPEN_ACK_TIMEOUT)
-    finally:
+
+    if not published:
+        # 没人会来唤醒这个槽：先摘掉，再立刻走回落。
         _corpus_release(seq, slot)
+        log('[airi-corpus] not published (settings file unwritable) '
+            '-> fallback directly (seq=%d)' % seq)
+        got = False
+    else:
+        try:
+            got = slot['event'].wait(CORPUS_OPEN_ACK_TIMEOUT)
+        finally:
+            _corpus_release(seq, slot)
 
     if got and slot['ok']:
         log('[airi-corpus] opened in VS Code (seq=%d, by=%s)'
@@ -636,19 +652,28 @@ def _open_corpus_worker(seq, slot=None):
         # 扩展接了单但打开失败（文件被占/权限…）—— 继续走回落，并留痕
         log('[airi-corpus] extension could not open it (seq=%d) -> fallback' % seq)
 
+    # 没能"在 VS Code 里打开"时，气泡里要交代原因：设置文件坏了这条路径
+    # 用户完全无从自己发现（日志在 ~/.dsh/pets/.airi-pet.log，没人会去看）。
+    prefix = ''
+    if not published:
+        prefix = '设置文件坏了，VS Code 那条路接不了单；'
+
     method = _open_corpus_fallback(path)
     if method == 'code-cli':
         log('[airi-corpus] opened via code CLI (seq=%d)' % seq)
         push_message('chatMessage',
-                     '台词库打开了（用 code 命令）。改完保存就生效。', 'greeting')
+                     prefix + '台词库打开了（用 code 命令）。改完保存就生效。',
+                     'angry' if prefix else 'greeting')
     elif method == 'system-default':
         log('[airi-corpus] opened via system default app (seq=%d)' % seq)
         push_message('chatMessage',
-                     '台词库放到你默认的编辑器里了。改完保存就生效。', 'greeting')
+                     prefix + '台词库放到你默认的编辑器里了。改完保存就生效。',
+                     'angry' if prefix else 'greeting')
     else:
         log('[airi-corpus] could not open corpus file (seq=%d, path=%s)' % (seq, path))
         push_message('errorAlert',
-                     '唔，我打不开这个文件，你手动去这儿找它：%s' % path, 'angry')
+                     prefix + '唔，我打不开这个文件，你手动去这儿找它：%s' % path,
+                     'angry')
 
 
 
@@ -1696,7 +1721,10 @@ class AiriHandler(BaseHTTPRequestHandler):
                     # 这个"没落过盘的新序号"写下去，扩展读到就自己打开语料。
                     saved = _persist_locked('openCorpusSeq', seq)
                 log('[airi-corpus] open requested (seq=%d, saved=%s)' % (seq, saved))
+                # ⚠️ published=saved（0.3.48）：序号没落盘 = 扩展永远不会看到
+                # 这个请求、也就不可能回执。此时 worker 不该白等，见它的 docstring。
                 threading.Thread(target=_open_corpus_worker, args=(seq, slot),
+                                 kwargs={'published': bool(saved)},
                                  daemon=True).start()
                 self._json_response({'ok': True, 'openCorpusSeq': seq,
                                      'saved': saved})
