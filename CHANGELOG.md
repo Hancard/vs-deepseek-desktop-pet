@@ -1,5 +1,73 @@
 # Change Log
 
+## [0.3.50] — 2026-10-30
+
+### Fixed
+
+- **气泡把 `null` / 数字 / 数组当语言名念出来**
+  （`python_backend/response_generator.py`）
+  `{language}` 占位符在出厂语料里是真在用的（syntax_error 9 条里 2 条、
+  type_error 8 条里 1 条），而这个值来自外部 `POST /push` 的 JSON：
+
+  ```json
+  {"count": 3, "sample_errors": [{"line": 2, "message": "invalid syntax"}],
+   "language": null}
+  ```
+
+  旧代码只写 `context.get("language", "python")` —— 默认值**只在键不存在时**
+  生效，键存在而值是 null 时拿到 `None`，直接拼进台词。实测（真调
+  `generate_response`，每个用例抽 20 次）：
+
+  ```
+  "language": null        → "None的语法不难吧？你怎么还能写错啊…"
+  "language": ""          → "的语法不难吧？你怎么还能写错啊…"
+  "language": 951753      → "951753的语法不难吧？…"
+  "language": ["qqzz"]    → "['qqzz']的语法不难吧？…"
+                             "缩进都能错，你是用记事本在写 ['qqzz'] 吗？"
+  ```
+  这是 0.3.44 修过的「第 None 行」同一个坑的第三个入口（`_nvl` 是前两个）。
+  修：新增 `_as_language()` —— 是字符串就用（去首尾空白），其余一律回落默认值，
+  与"键不存在"给出**同一个答案**，并回写 context（`try_deepseek_api` 读的是
+  原始值，不回写的话 LLM 的 prompt 里也会出现 `语言: None`）。
+
+- **同一个设置文件，桌宠按 5 秒跑、扩展按 30 秒跑**
+  （`desktop_pet/standalone.py`）
+  Python 的 `re` 对 str 的 `\d` 是 **Unicode 感知**的，`int()` / `float()` 也
+  接受所有 Nd 类数字；而 JS 的 `\d` 恒为 ASCII。于是下面这些写在设置文件里的
+  值，两个实现给出完全不同的答案（真 node + 真 Python 逐值对撞）：
+
+  ```
+  值                              Python           JS（扩展）
+  "５"（全角 5, U+FF15）          5 秒             不认 → 30 秒
+  "٥"（阿拉伯-印度 5, U+0665）     5 秒             不认 → 30 秒
+  "५"（天城文 5, U+096B）          5 秒             不认 → 30 秒
+  "1_0"（openCorpusSeq）          10               不认 → 0
+  2.9（openCorpusSeq）            2                不认 → 0
+  ```
+  菜单读的是桌宠（`GET /settings` → 5 秒），实际跑的是扩展（30 秒）——
+  "界面写着 5 秒、实际 30 秒"，正是 0.3.45 立 `_NUM_RE` 时要消灭的那种不一致。
+  修：`_NUM_RE` 的数字类改成 `[0-9]`；`_as_seq` 的口径与扩展侧
+  `coerceCorpusSeq()` 逐条对齐（拒布尔、只认 ASCII 十进制整数字符串、
+  浮点必须是整数值、其余一律 0）。这是本项目第五次修"两实现同一件事、
+  口径不同"（前四次：`_as_number`、`Number()` 强转、`round` 的银行家舍入、
+  `AIRI_STANDALONE_PORT`）。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_050.py`（19 条）：
+  - **A 段**（6 条）真调 `generate_response`，用有辨识度的标记
+    （`951753` / `['qqzz']`）防止断言退化成"偶然不出现"；
+  - **B 段**（4 条）把 32 个值同时喂给 Python 的 `_as_number` / `_as_seq` /
+    `clamp_detect_sec` 和真 node 跑的 JS 判据，逐值对撞接受集与结果；
+  - **C 段**（9 条）**第一次跨进程**把两半接起来跑：真 `standalone` 服务器
+    + 从 `src/` 现编译的扩展（真 `activate()`）+ 真设置文件轮询 + 真
+    `/event` 回执。断言扩展只开一次、**服务器没有走 `code` 回落**（那会在
+    VS Code 已开着时再拉一个窗口）、气泡是"在 VS Code 里打开了"、新序号
+    确实落盘。此前 Python 侧用假回执、扩展侧用不联网的桩，中间的
+    HTTP/文件约定一直没人验。
+  - 判断力：留旧的 `standalone.py` / `response_generator.py` 跑 →
+    **11 PASS / 8 FAIL**（A1~A4 + B1~B3），修复后 **19 PASS / 0 FAIL**。
+
 ## [0.3.49] — 2026-10-29
 
 ### Fixed
