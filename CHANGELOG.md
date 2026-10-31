@@ -1,5 +1,101 @@
 # Change Log
 
+## [0.3.51] — 2026-10-31
+
+### Fixed
+
+- **`files` 里混进一个非字符串，整条 LLM 路就静默消失**
+  （`python_backend/response_generator.py`）
+
+  `try_deepseek_api()` 拼提示词用的是 `', '.join(files[:3])` —— `str.join`
+  只吃字符串。而 `files` 是外部 `POST /push` 写的任意 JSON，旧代码只判
+  "是不是 list/tuple"，元素类型不管：
+
+  ```json
+  {"count": 3, "sample_errors": [{"line": 2, "message": "invalid syntax"}],
+   "files": ["src/main.py", null]}
+  ```
+
+  → `TypeError: sequence item 1: expected str instance, NoneType found`
+  → 被那里**裸的 `except Exception: pass`** 吞成"生成失败" → 回落本地语料。
+  外部看到的是 `/push` **200、"送到了"**，用户看到的是"配了 API key 却永远
+  只说内置台词"，日志里**一行都没有**。这是 0.3.40 在 `error_count` 上修过的
+  同一症状（`str > int` 也是 TypeError）的另一半。
+
+  实测（打桩 `client.chat.completions.create` 数调用次数）：
+
+  | `files`               | 旧码 LLM 调用 | 修复后 |
+  |-----------------------|---------------|--------|
+  | 缺省 / `[]` / `["a.py"]` | True       | True   |
+  | `[null]`              | **False**     | True   |
+  | `[123]`               | **False**     | True   |
+  | `["a.py", null]`      | **False**     | True   |
+
+  修：新增 `_as_file_list()` —— 只留**非空字符串**（不做 `str()` 强转，否则
+  `null` 会变成字面量 `"None"` 念进台词，重演 0.3.50 那种错），去首尾空白、
+  单条 ≤200 字、最多 8 条，并回写 context（其余消费者看到同一份）。
+
+- **提示词里的孤立代理让 httpx 直接抛错，同样被吞成"生成失败"**
+  （`python_backend/response_generator.py`）
+
+  Python 的 `str` 可以合法持有孤立代理（`'\ud83d'`），但 `httpx` 发请求时走
+  `json.dumps(..., ensure_ascii=False, allow_nan=False).encode('utf-8')`
+  （本机读 `httpx._content.encode_json` 源码确认）→
+  `UnicodeEncodeError: surrogates not allowed`。
+
+  这个值不需要攻击者，**自家扩展就能产出**（见下一条）。实测旧码：
+
+  ```
+  sample_errors 带孤立代理 → LLM 调用 False
+  language      带孤立代理 → LLM 调用 False
+  file_scan 的 file/样本   → LLM 调用 False
+  干净对照                 → True
+  ```
+
+  修：新增 `_encodable()`（utf-8 编不动就 `errors='replace'`），在
+  `client.chat.completions.create()` **之前**把 `user_prompt` 过一遍。
+  气泡那条路早有 `_sse_safe`，漏的是另一个出口 —— **HTTP 请求体**。
+
+- **扩展的 `clipMessage()` 会切在代理对中间**
+  （`src/extension.ts`）
+
+  和 `ui.html` 的 `clipBubbleText()`（0.3.43 已修）是同一段逻辑的两半，扩展
+  这一半当时漏了。`slice(0, maxLen - 1)` 走的是 UTF-16 码元：
+  `'x' * 58 + '💢' + 'tail'` → 保留的最后一个码元是 `U+D83D`（孤立高位代理），
+  `JSON.stringify` 写出 `"xxx…\ud83d…"`。服务端 `json.loads` 还原成一个带
+  孤立代理的 str，`_sse_safe` 只能把它替换成 `?`（面板里那半个字变问号），
+  更糟的是它会进 LLM 提示词。
+
+  实测（node 真跑 `src/` 里现抠出来的函数）：
+
+  ```
+  旧码：58x+emoji  len=60  lone=1  tail="x\ud83d…"
+        emoji 连排  lone=1
+  修复：          len=59  lone=0  tail="xx…"
+        连排        lone=0    六种排布合计 LONE=0
+  ```
+
+  修：判 `0xD800..0xDBFF` 就 `cut -= 1`，让 emoji 整个留在被截掉的一侧，
+  与 `clipBubbleText` 完全一致。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_051.py`（24 条）：
+  - **A 段**（8 条）`files` 族。判据是"LLM 真被调用" **且** 返回文本是 LLM 的
+    标记 —— 只看调用次数会被"调了但抛错"骗过；
+  - **B 段**（6 条）孤立代理进提示词。编码器**优先用真的
+    `httpx._content.encode_json`**，不用等价物代替 —— 这正是 bug 的现场。
+    另两条断言"发出去的提示词里确实没有孤立代理、且可 utf-8 编码"，
+    防止修复退化成 try/except 绕过去；
+  - **C 段**（4 条）真跑 `src/extension.ts`：把函数体从源码里抠出来写进临时
+    JS 用 node 跑，断言六种排布下 `LONE=0`、长度上限仍是 60、未到上限的文本
+    原样返回（含完整 emoji）；
+  - **D 段**（6 条）静态判据，防止有人"顺手简化"回去。
+  - 判断力：留旧的 `response_generator.py` → **12 PASS / 12 FAIL**；留旧的
+    `extension.ts` → **21 PASS / 3 FAIL**；修复后 **24 PASS / 0 FAIL**。
+  - 坑：`src/extension.ts` 是 **CRLF**，抠函数体前必须先归一化换行，否则
+    `indexOf('\n}\n')` 返回 -1、`slice` 拿到文件末尾两个字（`"fu"`）。
+
 ## [0.3.50] — 2026-10-30
 
 ### Fixed
