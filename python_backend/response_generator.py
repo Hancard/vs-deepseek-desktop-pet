@@ -116,6 +116,77 @@ def _as_language(value, fallback="python"):
     return fallback
 
 
+def _as_file_list(value, limit=8, max_len=200):
+    """把 `files` 收敛成"只含非空字符串"的列表（0.3.51）。
+
+    ⚠️ 这是 `_as_language` 同一个位置的**第四个**字段，也是唯一一个会让
+    LLM 那条路**整条静默失效**的：`try_deepseek_api()` 里写的是
+
+        user_prompt = f"... 涉及文件: {', '.join(files[:3])}"
+
+    而 `str.join` 只吃字符串 —— `files` 里只要有一个元素不是 str（JSON 的
+    `null`、数字、对象、嵌套数组都能通过 `json.loads`），`join` 就抛
+    TypeError，被那里**裸的 `except Exception: pass`** 吞掉 → 返回 None →
+    回落本地语料。外部看到的是 `/push` 200、"送到了"，用户看到的是"配了
+    API key 却永远只说内置台词"，而且**日志里一行都没有**（0.3.40 在
+    error_count 上修过完全一样的症状，这里是同一个字符串拼接的另一半）。
+
+    实测（真调 generate_response，打桩的 OpenAI client 计数）：
+    ```
+    files 缺省 / [] / ["a.py"]        LLM 调用 True
+    files: [null]                      LLM 调用 False   ← join 抛 TypeError
+    files: [123]                      LLM 调用 False
+    files: ["a.py", null]             LLM 调用 False
+    ```
+    口径：**只保留 str 且去空白后非空的元素**，顺带上限（条数与单条长度）——
+    `files` 只用来给提示词报个文件名，`None` / 数字 / 对象进来只会污染
+    气泡与提示词，不该被 `str()` 转成 "None" 念出去（与 `_nvl` 同一条理由）。
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        out.append(text[:max_len])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _encodable(text):
+    """把任意字符串收敛成"一定能 utf-8 编码"的形态（0.3.51）。
+
+    ⚠️ Python 的 str 合法地可以含**孤立代理**（`'\\ud83d'`），它不是非法状态，
+    只是不能编码成 utf-8。来源有两个，都不需要攻击者：
+      · 自家扩展的 `clipMessage()` 按 UTF-16 码元截断诊断消息，第 59 个码元
+        正好是某个 emoji 的前半（0.3.51 已在**生产侧**修掉，见那里）；
+      · 任何更早版本的扩展 / 本机脚本 `POST /push {"sample_errors":[{"message":
+        "\\ud800"}]}` —— 桌宠不能假设发送方是新的。
+
+    后果只在 **LLM 那条路**上：`httpx` 发送时是
+    `json.dumps(..., ensure_ascii=False).encode('utf-8')`，孤立代理直接抛
+    `UnicodeEncodeError: surrogates not allowed`（本机实测
+    `httpx._content.encode_json`），而 `try_deepseek_api` 外面是
+    `except Exception: pass` → 返回 None → 静默回落本地语料。
+    用户侧的症状与 `files` 那条一模一样：配了 API key 却永远只说内置台词，
+    日志里一行都没有。
+
+    气泡那条路不用管：`standalone.push_message` 出口有 `_sse_safe` 兜着
+    （同样是 `errors='replace'`）。这里补的是**另一个出口**（HTTP 请求体）。
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    try:
+        text.encode('utf-8')
+        return text
+    except UnicodeEncodeError:
+        return text.encode('utf-8', 'replace').decode('utf-8')
+
+
 _last_pick = {}
 
 
@@ -212,6 +283,13 @@ def try_deepseek_api(context: dict) -> Optional[str]:
         elif trigger == "diagnostics":
             user_prompt += "\n程序员刚写了一堆错误，请用傲娇的方式吐槽并悄悄给出建议。"
 
+        # ⚠️ 发出去之前必须过一遍"一定能编码"（0.3.51）。提示词里拼了外部
+        # 数据（file / language / sample_errors 的 message），任何一处带孤
+        # 立代理都会让 httpx 的 encode_json 抛 UnicodeEncodeError —— 而外面
+        # 是 `except Exception: pass`，症状是"配了 key 只说内置台词"且零日志。
+        # 放在**唯一出口**上（见 _encodable 的注释），新增拼接不用再记得这件事。
+        user_prompt = _encodable(user_prompt)
+
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
@@ -272,8 +350,11 @@ def generate_response(context: dict) -> dict:
     # 被 167 行吞掉 → 静默回落本地语料，表现为"配了 API key 却永远只说内置
     # 台词"且毫无提示。同理 files 可能是 None。
     context["error_count"] = error_count
-    if not isinstance(context.get("files"), (list, tuple)):
-        context["files"] = []
+    # ⚠️ files 也必须归一化成"只含字符串"的列表（0.3.51）。以前只判"是不是
+    # list/tuple"，元素类型不管 —— 而 try_deepseek_api 用的是
+    # `', '.join(files[:3])`，一个 null / 数字 / 对象就让整条 LLM 路径
+    # 静默失效（实测见 _as_file_list 的注释）。回写理由与 error_count 相同。
+    context["files"] = _as_file_list(context.get("files"))
     # ⚠️ language 也必须归一化并回写（0.3.50）：见 _as_language 的注释 ——
     # null / 数字 / 数组会原样拼进 `{language}` 占位符，气泡念出 "None的语法…"。
     # 回写的理由与 error_count 相同：try_deepseek_api 读的是 context 里的原始值。
