@@ -610,10 +610,32 @@ function fileScanConfig(): { enabled: boolean; repeatSec: number } {
 	};
 }
 
-/** 错误消息截断：只取首行、最多 60 字符，避免气泡塞进整段 traceback */
+/** 错误消息截断：只取首行、最多 60 字符，避免气泡塞进整段 traceback
+ *
+ *  ⚠️ 不能切在**代理对中间**（0.3.51）。`slice` 走的是 UTF-16 码元，被保留
+ *  的最后一个码元正好是某个 emoji（💢 / 🐳 / ⚠️）的高位代理时，切出来的是
+ *  **孤立代理**。它不是非法 JS，但：
+ *    · `JSON.stringify` 会把它写成 `\ud83d` 这种转义，
+ *    · 服务端 `json.loads` 还原成一个孤立代理的 str，`_sse_safe` 只能把它
+ *      替换成 `?`（面板里那半个字就成了问号），
+ *    · 更糟的是它会进 **LLM 提示词**：httpx 用
+ *      `json.dumps(..., ensure_ascii=False).encode('utf-8')` 发请求，
+ *      孤立代理直接抛 `UnicodeEncodeError: surrogates not allowed`
+ *      （本机实测，httpx._content.encode_json），而 `try_deepseek_api`
+ *      的 `except Exception: pass` 会把它吞成"生成失败" —— 配了 API key
+ *      却永远只说内置台词，日志里一行都没有。
+ *  现实触发不需要攻击者：诊断消息里带源码片段/emoji 很常见（
+ *  `SyntaxError: invalid character '🐳' (U+1F433)` 就是一行），
+ *  第 59 个码元落在 emoji 前半就命中。
+ *  修法与 ui.html 的 clipBubbleText（0.3.43）完全一致：退一个码元，让那个
+ *  emoji 整个留在被截掉的一侧。 */
 function clipMessage(message: string, maxLen = 60): string {
 	const oneLine = message.split('\n')[0] ?? '';
-	return oneLine.length > maxLen ? oneLine.slice(0, maxLen - 1) + '…' : oneLine;
+	if (oneLine.length <= maxLen) { return oneLine; }
+	let cut = maxLen - 1;                       // 保留 [0, cut)
+	const lastKept = oneLine.charCodeAt(cut - 1);
+	if (lastKept >= 0xD800 && lastKept <= 0xDBFF) { cut -= 1; }
+	return oneLine.slice(0, cut) + '…';
 }
 
 /** 扫当前文件；返回本拍是否决定说话（供 petTick 保证一拍只说一条） */
