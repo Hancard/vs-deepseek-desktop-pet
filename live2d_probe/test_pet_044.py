@@ -771,6 +771,12 @@ section('E2 手动重建 EventSource 要带续传点')
 try:
     fn = grab_fn(HSRC, 'function connectSSE() {')
     check('E2-0 抠到 connectSSE', bool(fn), 'len=%d' % len(fn))
+    # 0.3.53：算续传点那一步抽成了 adoptSSESeq（要能跟上服务端重启），
+    # connectSSE 现在依赖它 —— 不一起喂进去就是 ReferenceError，
+    # 三条 SEQ 断言会一起变成 None（"mock 没跟上"，不是回归）。
+    adv = grab_fn(HSRC, 'function adoptSSESeq(eid, lastSeq, isFirst) {')
+    check('E2-0b 抠到 adoptSSESeq（connectSSE 的依赖）', bool(adv),
+          'len=%d' % len(adv))
     check('E2-1 连接地址带 after_seq（否则服务端重播最近 20 条）',
           'after_seq=' in fn, 'fn=%r' % fn[:260])
     check('E2-2 有 lastSSESeq 状态', 'lastSSESeq' in HSRC)
@@ -802,7 +808,7 @@ function showBubble() {}
 function setEmotion() {}
 function typeText() {}
 """
-    out, err, rc = run_node(js.replace('__FN__', fn))
+    out, err, rc = run_node(js.replace('__FN__', adv + '\n' + fn))
     kv = kv_of(out)
     check('E2-4 node 跑通', rc == 0, 'rc=%d err=%s' % (rc, err[:400]))
     check('E2-5 首次带续传点（?after_seq=5）',
