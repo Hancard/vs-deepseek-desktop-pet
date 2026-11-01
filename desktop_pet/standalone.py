@@ -291,6 +291,39 @@ def _nvl(value, fallback='?'):
     return value
 
 
+def _as_label(value, fallback='?', max_len=200):
+    """把"要念给人听的标量"收敛成短字符串（0.3.52，与
+    `response_generator._as_label` **逐条同口径**）。
+
+    ⚠️ 为什么这里要再写一份：后端不可用（没装 openai）时走的就是
+    `_builtin_reply`，那条路同样把 `file` / `line` / `message` 拼进气泡。
+    `_nvl` 只认 None 和空串，**非标量原样放行** —— `file` 传数组时气泡念出
+    "['a.py'] 里还躺着 3 个 bug"。两份实现必须给出同样的答案（test_pet_052
+    的 B 段逐值对撞），否则同一个请求在"装了 openai"与"没装"的机器上
+    气泡不一样 —— 本项目已经因为"两实现口径不一致"修过五次
+    （`_as_number` / `Number()` 强转 / `round` 的银行家舍入 /
+    `AIRI_STANDALONE_PORT` / `_NUM_RE`）。
+
+    口径：布尔不算标签（`str(True)` 是 "True"）；整数值的 float 写成整数
+    （JSON 的 3.0 念成"第3.0行"没道理）；NaN / ±Infinity 回落占位符；
+    dict / list 一律回落，**绝不 str()**；按 max_len 截断。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        return text[:max_len] if text else fallback
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int):
+        return str(value)[:max_len]
+    if isinstance(value, float):
+        if value != value or value in (float('inf'), float('-inf')):
+            return fallback
+        if value.is_integer():
+            return str(int(value))[:max_len]
+        return ('%g' % value)[:max_len]
+    return fallback
+
+
 def _as_seq(value):
     """把任意输入收敛成非负整数序号（「编辑语料」请求的计次）。
 
@@ -1062,7 +1095,9 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None,
     """
     emit = _push or push_message
     if trigger == 'file_scan':
-        fname = file or '当前文件'
+        # ⚠️ 走 _as_label（0.3.52）：`file or '当前文件'` 对数组/对象是**真值**，
+        # 于是 `['a.py']` 被原样念进气泡（与 response_generator 同一条）。
+        fname = _as_label(file, '当前文件', 120)
         if error_count > 0:
             detail = ''
             if isinstance(items, list):
@@ -1071,9 +1106,10 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None,
                     if isinstance(it, dict):
                         # ⚠️ line 可能是 JSON null（0.3.44）：dict.get 的默认值
                         # 只在"键不存在"时生效，null 会原样拼成"第 None 行"。
+                        # 非标量（dict/list）同理要挡（0.3.52），见 _as_label。
                         parts.append('第%s行：%s' % (
-                            _nvl(it.get('line')),
-                            str(it.get('message', ''))[:40]))
+                            _as_label(it.get('line'), '?', 12),
+                            _as_label(it.get('message'), '', 40)))
                 detail = '；'.join(parts)
             if reason == 'remind':
                 text = '%s 里那 %d 个 bug 还在呢，我可都记着账的。%s' % (

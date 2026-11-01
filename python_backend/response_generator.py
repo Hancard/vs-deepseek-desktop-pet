@@ -157,6 +157,54 @@ def _as_file_list(value, limit=8, max_len=200):
     return out
 
 
+def _as_label(value, fallback="?", max_len=200):
+    """把"要念给人听的标量"收敛成短字符串（0.3.52）。
+
+    ⚠️ 这是 `_as_language`（0.3.50）/ `_as_file_list`（0.3.51）同一个位置的
+    最后一批字段：`file` / `line` / `message` / `reason`。它们以前只有
+    `_nvl` 兜着，而 `_nvl` 只认 `None` 和空串 —— **非标量原样放行**，于是
+    `%s` / `str()` 把 Python 的 repr 直接念进气泡。实测（真调
+    `generate_response`，真 HTTP `/push` 看 SSE 文本）：
+
+        {"trigger":"file_scan","error_count":3,"file":["a.py"],...}
+          → "['a.py'] 的 bug 有 3 个…你是打算留着过年吗？"
+        {"file":{"a":1}}
+          → "喂，{'a': 1} 里还躺着 3 个 bug，别装没看见！"
+        {"sample_errors":[{"line":{"a":1},"message":"x"}]}
+          → "第 {'a': 1} 行附近有问题…第{'a': 1}行：x"
+        {"sample_errors":[{"line":3,"message":{"k":"v"}}]}
+          → "从第 3 行开始修吧。 第3行：{'k': 'v'}"
+
+    提示词那条路同样被污染（`- ['a.py']:1 → x`、`- :{'a': 1} → x`）——
+    模型看到的是字典字面量而不是文件名/行号。
+
+    口径（与 `_as_int` / `_as_seq` / `_as_number` 保持一致）：
+      · **布尔不是标签**：`True` 会是 `str()` 出来的 "True"，而 JSON 里
+        `"line": true` 本来就是"没写"的意思 → 回落占位符；
+      · **整数值的 float 写成整数**：JSON 的 `3.0` 解析成 float，念成
+        "第3.0行"没道理；NaN / ±Infinity 同样回落（它们在 `json.loads`
+        里是合法字面量，`%s` 会念出 "nan" / "inf"）；
+      · **非标量（dict / list）一律回落占位符**，绝不 `str()` —— 这正是
+        本条 bug 的形态；
+      · 长度上限：`file` 是外部写的，5KB 的"文件名"不该整段进气泡
+        （实测能撑满 `push_message` 的 4000 字上限）。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        return text[:max_len] if text else fallback
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int):
+        return str(value)[:max_len]
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return fallback
+        if value.is_integer():
+            return str(int(value))[:max_len]
+        return ("%g" % value)[:max_len]
+    return fallback
+
+
 def _encodable(text):
     """把任意字符串收敛成"一定能 utf-8 编码"的形态（0.3.51）。
 
@@ -270,14 +318,16 @@ def try_deepseek_api(context: dict) -> Optional[str]:
             user_prompt += "\n程序员刚才把错误全修好了，请用傲娇的方式表示一下。"
         elif trigger == "file_scan":
             if error_count > 0:
+                # `or '当前文件'`：file 被归一化成空串（传了 null / 数组 / 对象）
+                # 时，这里原本会写成"打开的文件  有 1 个错误"（0.3.52）
                 user_prompt += (
-                    f"\n程序员当前打开的文件 {context.get('file', '')} 有 "
+                    f"\n程序员当前打开的文件 {context.get('file') or '当前文件'} 有 "
                     f"{error_count} 个未修复的错误。请用傲娇的方式提醒，"
                     "并点名最前面几处（行号+内容），一段话以内。"
                 )
             else:
                 user_prompt += (
-                    f"\n程序员刚把 {context.get('file', '当前文件')} 的错误全部修好，"
+                    f"\n程序员刚把 {context.get('file') or '当前文件'} 的错误全部修好，"
                     "请用傲娇方式表示认可，一句话即可。"
                 )
         elif trigger == "diagnostics":
@@ -360,6 +410,12 @@ def generate_response(context: dict) -> dict:
     # 回写的理由与 error_count 相同：try_deepseek_api 读的是 context 里的原始值。
     language = _as_language(context.get("language"))
     context["language"] = language
+    # ⚠️ file 同样要归一化（0.3.52）：`str(context.get("file", "") or "当前文件")`
+    # 对 dict/list 会念出 `{'a': 1}` / `['a.py']`（实测）。只在这个键**存在**
+    # 时回写 —— 键不存在要保持"不存在"，提示词那边的
+    # `context.get('file', '当前文件')` 正依赖这个区别。
+    if "file" in context:
+        context["file"] = _as_label(context.get("file"), "", 120)
     # sample_errors 元素不一定是 dict（外部 /push 可传字符串数组），
     # 统一归一化成 dict，categorize_errors / try_deepseek_api 都按 dict 消费
     # 外部输入不可信：sample_errors 传标量（数字/布尔）时 `for e in raw`
@@ -372,11 +428,30 @@ def generate_response(context: dict) -> dict:
         raw = [raw]
     elif not isinstance(raw, (list, tuple)):
         raw = []
-    errors = [
-        e if isinstance(e, dict) else {"message": str(e)}
-        for e in raw
-        if isinstance(e, (dict, str, int, float, bool))
-    ]
+    errors = []
+    for e in raw:
+        if isinstance(e, dict):
+            item = dict(e)          # 复制一份再改：下面要原地归一化字段
+        elif isinstance(e, bytes):
+            item = {"message": _as_label(e.decode("utf-8", "replace"), "", 200)}
+        elif isinstance(e, str) or (
+                isinstance(e, (int, float)) and not isinstance(e, bool)):
+            # 单独的标量当作"只有内容的一条错误"（`str()` 会把 True 念成
+            # "True"、把 3.5 念成 "3.5"，所以走 _as_label 的同一个口径）
+            item = {"message": _as_label(e, "", 200)}
+        else:
+            # 布尔 / None / 嵌套列表都不像"一条错误"
+            continue
+        # ⚠️ 三个字段逐个归一化（0.3.52）：非标量会被 `%s` / `str()` 变成
+        # Python 的 repr 直接念进气泡（实测"第 {'a': 1} 行附近有问题"），
+        # 提示词那条路同样被污染（`- :{'a': 1} → x`）。见 _as_label 的注释。
+        if "line" in item:
+            item["line"] = _as_label(item.get("line"), "?", 12)
+        if "message" in item:
+            item["message"] = _as_label(item.get("message"), "", 200)
+        if "file" in item:
+            item["file"] = _as_label(item.get("file"), "", 120)
+        errors.append(item)
     context["sample_errors"] = errors
 
     # 确定消息类型
@@ -424,7 +499,7 @@ def generate_response(context: dict) -> dict:
 
     # Fallback: 从语料库抽取
     if trigger == "file_scan":
-        file_name = str(context.get("file", "") or "当前文件")
+        file_name = _as_label(context.get("file"), "当前文件", 120)
         if error_count > 0:
             # reason=remind 表示数量没变的周期提醒，换一套台词避免复读
             reason = str(context.get("reason", "changed"))
