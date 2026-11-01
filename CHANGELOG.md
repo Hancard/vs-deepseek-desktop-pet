@@ -1,5 +1,70 @@
 # Change Log
 
+## [0.3.53] — 2026-11-01
+
+### Fixed
+
+- **桌宠重启后 SSE 续传基线永久错位：断线期间的消息全丢，跑久了又把旧对话重播一遍**
+  （`desktop_pet/ui.html`）
+
+  服务端的 `_seq` 是**进程级**计数器（`_seq = 0`，只在 `push_message` 里 +1），
+  桌宠一重启就归零；而页面里的 `lastSSESeq` 活得更久 —— 桌宠崩溃后由扩展
+  重新拉起，页面不一定跟着重建。旧写法只增不减：
+
+  ```js
+  if (isFinite(eid) && eid > lastSSESeq) { lastSSESeq = eid; }
+  ```
+
+  于是旧进程的最大 id（比如 500）被永久当成续传点，两个方向都错：
+
+  - 新进程 `_seq` 还没涨过 500 时，`?after_seq=500` 被服务端钳到当前 `_seq`
+    （`/events` 里那段"钳上界否则永久饿死"的注释），replay 恒空 ——
+    **断线期间产生的消息一条都收不到**；
+  - 涨过 500 之后，after_seq 重新"有效"，一次重连就把上一代的旧对话
+    当新消息重播一遍 —— 正是 0.3.44 给事件加 `id:` 要治的复读机。
+
+  实测（真 `standalone` + 真 `push_message` + 真 `/events`）：`?after_seq=500`
+  而当时 `_seq=3` → 收到 **0 条**；`?after_seq=3` 而当时 `_seq=8` → 重播
+  **5 条**旧消息。
+
+  修法：把续传点的合并抽成 `adoptSSESeq(eid, lastSeq, isFirst)`，
+  **只允许每条连接的第一条事件把基线回退**（稳态下同一条连接里 id 必然
+  单调递增，只有"新连接的第一条"上出现更小的 id 才唯一地意味着换了进程）。
+  这样多连接并存时也不会互相把基线拽来拽去。
+
+- **回归脚本 `_run_all.py` 恒以 0 退出，"全绿"判据退化成"跑完了没有"**
+  （`live2d_probe/_run_all.py`，**本地脚本，未入库** —— `live2d_probe/.gitignore`
+  的 `_*` 把它排除了）
+
+  脚本从头到尾没有 `sys.exit`，而它自己的文件头写着"真实结论只能看 rc"。
+  实测（本轮开发过程）：表里明明印着 `共 40 个测试文件，通过 39，异常 1`，
+  `python _run_all.py; echo rc=$?` 拿到的仍是 **0** —— 差点据此宣布全绿。
+  一份"通过 1、异常 1"的假测试目录配旧 runner 同样是 rc=0。
+
+  修法：末尾 `sys.exit(1 if bad else 0)`，`bad` 仍是原来那两条判据
+  （rc 非 0，或打出了 `FAIL` 标记）。
+
+- **`test_pet_044` 的 E2 段跟上新依赖**（`live2d_probe/test_pet_044.py`）
+
+  `connectSSE` 现在算续传点时调用 `adoptSSESeq`，而 E2 段只把 `connectSSE`
+  抠进 node —— 少了那个函数就是 `ReferenceError`，三条 `SEQ` 断言一起变成
+  `None`。这不属于回归，是**脚手架没跟上**：补注 `adoptSSESeq`，断言本身
+  一条未改（`SEQ=9` / 空 id 不打回 0 的语义完全不变）。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_053.py`（29 条）：
+  - A 段起**真** standalone，用真 `/push` 出口和真 `/events` 坐实上面那两种
+    失效方向（判据是"收到几条 id"这个副作用，不是读代码）；
+  - B 段从 `ui.html` 里抠出 `adoptSSESeq`，用 node 跑 12 组输入
+    （稳态递增 / 同 id / 重启对齐 500→1 / 重启后继续 / 全新页重播 /
+    0 与 NaN 与负数 / 非首条不许回退 / 首条不许胡乱回退）；
+  - C 段静态判据：旧的一行式赋值必须消失、`firstEvent` 必须 per-connection；
+  - D 段把 `_run_all.py` 复制到临时目录、喂假测试进去，用**真 rc** 判定
+    （全绿时必须是 0，有失败时必须非零）。
+- 判断力：回滚 `ui.html` + `_run_all.py` 后 **9 FAIL / 7 PASS**；修复后
+  **29 PASS / 0 FAIL**。全量回归 **40/40**，且 `rc=0` 这回真代表全绿。
+
 ## [0.3.52] — 2026-11-01
 
 ### Fixed
