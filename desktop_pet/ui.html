@@ -1297,6 +1297,37 @@
     // 查询串上（服务端 /events 认 ?after_seq=）。
     var lastSSESeq = 0;
 
+    /** 把「服务端这条事件的 id」合并进续传基线（0.3.53）。
+     *
+     *  ⚠️ 基线**不能只增不减**。服务端的 `_seq` 是**进程级**计数，重启归零
+     *  （standalone.py: `_seq = 0`，只在 push_message 里 +1）；而页面的
+     *  `lastSSESeq` 活得更久 —— 桌宠被关掉重开、崩溃后由扩展重新拉起，页面
+     *  都不一定会跟着重建。旧写法 `if (eid > lastSSESeq) lastSSESeq = eid;`
+     *  于是把旧进程的最大 id（比如 500）永久当成续传点，两个方向都错：
+     *
+     *    · 新进程 `_seq` 还没涨过 500 时：`?after_seq=500` 被服务端钳到当前
+     *      `_seq`（见 /events 里那段"钳上界否则永久饿死"的注释），replay 恒空
+     *      —— 断线期间产生的消息**一条都收不到**；
+     *    · 涨过 500 之后：after_seq 重新"有效"，一次重连就把上一代的旧对话
+     *      当新消息重播一遍 —— 正是 0.3.44 加 id 要治的复读机。
+     *  实测（真 standalone + 真 /push）：
+     *    `?after_seq=500`（_seq=3）→ 收到 0 条；
+     *    `?after_seq=3`（_seq=8）→ 重播 5 条旧消息。
+     *
+     *  为什么只在**每条连接的第一条事件**上允许回退：稳态下同一条连接里的
+     *  id 必然单调递增，只在"新连接的第一条"这个点上，id 变小才唯一地意味着
+     *  "服务端换了一代进程"。这样多连接并存时也不会互相把基线拽来拽去。
+     *
+     *  @param eid      服务端给的事件 id（Number(event.lastEventId)）
+     *  @param lastSeq  当前基线
+     *  @param isFirst  是否为这条连接收到的第一条事件
+     *  @returns 新的基线 */
+    function adoptSSESeq(eid, lastSeq, isFirst) {
+      if (!isFinite(eid) || eid <= 0) { return lastSeq; }   // 空 id / NaN / 0：保持原值
+      if (isFirst && eid < lastSeq) { return eid; }         // 服务端计数倒退 => 换了进程
+      return eid > lastSeq ? eid : lastSeq;
+    }
+
     function scheduleSSERetry() {
       if (sseRetryTimer) return;                 // 已经在等了，别叠定时器
       sseRetryTimer = setTimeout(function() {
@@ -1315,15 +1346,21 @@
         : SSE_URL;
       var es = new EventSource(url);
       sseInstance = es;
+      // 本条连接还没收到过事件（0.3.53）。只有第一个事件允许把基线**回退**，
+      // 用来对齐"服务端重启后 _seq 归零"，见 adoptSSESeq。
+      var firstEvent = true;
       es.onopen = function() {
         setOnline(true);
         sseRetryDelay = 1000;                    // 真的连上了就把退避重置
         fetch(EVENT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'desktopReady' }) }).catch(function() {});
       };
       es.onmessage = function(event) {
-        // id 由服务端写在 `id:` 行里；空串/非数字时保持原值
-        var eid = Number(event && event.lastEventId);
-        if (isFinite(eid) && eid > lastSSESeq) { lastSSESeq = eid; }
+        // id 由服务端写在 `id:` 行里；空串/非数字时保持原值。
+        // ⚠️ 不能写成 `eid > lastSSESeq` 才赋值（0.3.53）—— 那样桌宠重启后
+        //    续传基线会永久停在上一代的巨大值上，见 adoptSSESeq。
+        lastSSESeq = adoptSSESeq(Number(event && event.lastEventId),
+                                 lastSSESeq, firstEvent);
+        firstEvent = false;
         try {
           var msg = JSON.parse(event.data);
           if (!msg || !msg.type) return;
