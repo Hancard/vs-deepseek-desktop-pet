@@ -157,6 +157,46 @@ def _as_file_list(value, limit=8, max_len=200):
     return out
 
 
+#: `generate_response` 认得的事件名（0.3.54）。与 standalone 侧发来的、
+#: 以及 `python_backend/main.py` 用的一致；`heartbeat` 是"故意不说"的那条。
+_TRIGGERS = frozenset({"file_scan", "diagnostics", "all_clear",
+                       "greeting", "heartbeat"})
+
+
+def _as_trigger(value):
+    """把 `trigger` 收敛成五个已知事件之一（0.3.54）。
+
+    ⚠️ 这是 `_as_language`（0.3.50）/ `_as_file_list`（0.3.51）/ `_as_label`
+    （0.3.52）同一个位置的**最后一个字段**，而且后果比它们都重：它不是把
+    某个字念错，而是**把整件事的性质判错**。
+
+    `context` 是外部 `/push` 写的，`dict.get(k, default)` 的默认值**只在键
+    不存在时**生效。于是 `{"trigger": null}` 拿到的是 `None` 而不是
+    'diagnostics'，一路穿过 `trigger in ("diagnostics","file_scan")`（False）
+    与三个 `elif trigger == ...`（全 False），落进 `else: emotion='idle',
+    category='encourage'`。实测（真服务端 + 真 `/push` + 真 SSE 帧）：
+
+        trigger='diagnostics'  count=5  → errorAlert / surprised / "天哪 5 个错误！…"
+        trigger=null           count=5  → chatMessage / idle / "…你的代码确实有进步了。"
+        trigger=["file_scan"]  count=5  → chatMessage / idle / "慢慢来嘛，谁一开始就写得好？"
+        trigger=123            count=5  → chatMessage / idle / "累了就喝口水休息一下。"
+
+    三条畸形输入都是 HTTP 200、"已推送"、日志零行，而用户看到的是**明明
+    有 5 个 bug，桌宠却在夸他**（连气泡颜色都不是红的）。
+
+    口径：**只认已知的五个字符串**，其余一律 `'diagnostics'` —— 因为调用方
+    已经把 `error_count` 一起送来了，而"报错/干净"由那个数决定（见
+    `generate_response` 里 `error_count <= 0` 的分支），不需要 trigger 猜。
+    这与 `standalone._builtin_reply` 的口径一致：它本来就不看 trigger 判断
+    有没有错，只在 `trigger == 'file_scan'` 时换说法。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text in _TRIGGERS:
+            return text
+    return "diagnostics"
+
+
 def _as_label(value, fallback="?", max_len=200):
     """把"要念给人听的标量"收敛成短字符串（0.3.52）。
 
@@ -294,7 +334,7 @@ def try_deepseek_api(context: dict) -> Optional[str]:
 
         from character import SYSTEM_PROMPT
 
-        trigger = context.get("trigger", "diagnostics")
+        trigger = _as_trigger(context.get("trigger"))
         error_count = context.get("error_count", 0)
         language = context.get("language", "unknown")
         files = context.get("files", [])
@@ -373,7 +413,7 @@ def generate_response(context: dict) -> dict:
         }
     }
     """
-    trigger = context.get("trigger", "diagnostics")
+    trigger = _as_trigger(context.get("trigger"))
     # 外部输入不可信：error_count 传 "3"/None 等会让后面的 >= 比较抛 TypeError
     # ⚠️ 必须连 OverflowError 一起兜（0.3.45）：Python 的 json 默认接受字面量
     # `1e999` / `Infinity`，解析成 float('inf')，而 `int(inf)` 抛的正是它
@@ -480,7 +520,16 @@ def generate_response(context: dict) -> dict:
             emotion = "happy"
             category = "file_clear"
     elif trigger == "diagnostics":
-        if error_count >= 5:
+        if error_count <= 0:
+            # ⚠️ 没有错误时**不能**再走 categorize_errors(errors)（0.3.54）：
+            # 它对空列表恒返回 "syntax_error"，而选池用的就是这个 category ——
+            # 于是"一个错误都没有"会让桌宠说出"第 ? 行少了个括号…你是打算
+            # 自己数着玩吗？"。这条路径以前被"扩展只在 count>0 时发
+            # diagnostics"挡住，但 `{"trigger": null}` 归一化之后（见
+            # _as_trigger）它会正经走到这里。
+            emotion = "idle"
+            category = "encourage"
+        elif error_count >= 5:
             emotion = "surprised"
             category = "many_errors"
         else:
