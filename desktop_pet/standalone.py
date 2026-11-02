@@ -956,8 +956,13 @@ def _as_msg_type(value):
     return 'chatMessage'
 
 
+#: 前端 `EMOTION_EXPRESSION`（Live2D 表情）与 CSS `[data-emotion="..."]`
+#: 真正认得的五个（0.3.54）。见 _as_emotion。
+_EMOTIONS = frozenset({'idle', 'greeting', 'angry', 'happy', 'surprised'})
+
+
 def _as_emotion(value):
-    """情绪名归一化（0.3.45）：非字符串 / 空串 → idle，并限长。
+    """情绪名归一化（0.3.45 收类型，0.3.54 收白名单）：只认五个，其余 idle。
 
     ⚠️ 除了"前端 setEmotion 收到数字会当类名拼"这种小问题，主要原因是
     **帧的合法性**：`{"emotion": 1e999}` 解析成 float('inf')，而
@@ -965,11 +970,30 @@ def _as_emotion(value):
     JSON，前端 `JSON.parse` 直接抛错（被 catch 成一条 reportJS），**整条气泡
     消失**；坏帧还留在队列里，之后每次重连按 SSE_REPLAY_COUNT 重播都再炸
     一次。_sse_safe 只保证"能 utf-8 编码"，管不了 JSON 合法性。
+
+    ⚠️ 0.3.54：原来的口径是"是字符串、非空就放行"（截到 32 字符），
+    于是 `{"emotion": "nope"}` 会原样进 SSE。而 `ui.html` 的 `setEmotion`
+    拿它做两件事，**两件都出事**：
+
+      · `charBox.setAttribute('data-emotion', 'nope')` —— CSS 只有
+        `[data-emotion="angry"|"greeting"|"happy"|"surprised"]` 四条规则，
+        陌生值让它们**全部失配**，角色卡的表情动作直接停住（8 秒后由
+        定时器刷回 idle 才恢复）；
+      · `CHAR_IMG.replace(/(\\.\\w+)$/, '_' + emotion + '$1')` —— 拼出一个
+        必然 404 的图片地址（`character_nope.png`），`onerror` 再闪回默认图。
+
+        实测 `_as_emotion('../evil')` 返回 `'../evil'`（旧码），拼出来是
+        `character_../evil.png`。
+
+    这与 `_as_msg_type` 是同一个判断的两半：那个早就用 `_PUSH_TYPES`
+    白名单了（注释里写着"不认识的名字则在 switch 里落空"，正是这里的情形），
+    这个一直没跟上。前端的 `EMOTION_EXPRESSION` 与 CSS 都只有这五个键，
+    后端放行陌生值等于把一个**前端已经判定为无效**的名字发过去。
     """
     if isinstance(value, str):
         text = value.strip()
-        if text:
-            return text[:32]
+        if text in _EMOTIONS:
+            return text
     return 'idle'
 
 
