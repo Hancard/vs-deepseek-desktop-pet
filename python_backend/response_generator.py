@@ -157,14 +157,14 @@ def _as_file_list(value, limit=8, max_len=200):
     return out
 
 
-#: `generate_response` 认得的事件名（0.3.54）。与 standalone 侧发来的、
+#: `generate_response` 认得的事件名（0.4.0）。与 standalone 侧发来的、
 #: 以及 `python_backend/main.py` 用的一致；`heartbeat` 是"故意不说"的那条。
 _TRIGGERS = frozenset({"file_scan", "diagnostics", "all_clear",
                        "greeting", "heartbeat"})
 
 
 def _as_trigger(value):
-    """把 `trigger` 收敛成五个已知事件之一（0.3.54）。
+    """把 `trigger` 收敛成五个已知事件之一（0.4.0）。
 
     ⚠️ 这是 `_as_language`（0.3.50）/ `_as_file_list`（0.3.51）/ `_as_label`
     （0.3.52）同一个位置的**最后一个字段**，而且后果比它们都重：它不是把
@@ -521,7 +521,7 @@ def generate_response(context: dict) -> dict:
             category = "file_clear"
     elif trigger == "diagnostics":
         if error_count <= 0:
-            # ⚠️ 没有错误时**不能**再走 categorize_errors(errors)（0.3.54）：
+            # ⚠️ 没有错误时**不能**再走 categorize_errors(errors)（0.4.0）：
             # 它对空列表恒返回 "syntax_error"，而选池用的就是这个 category ——
             # 于是"一个错误都没有"会让桌宠说出"第 ? 行少了个括号…你是打算
             # 自己数着玩吗？"。这条路径以前被"扩展只在 count>0 时发

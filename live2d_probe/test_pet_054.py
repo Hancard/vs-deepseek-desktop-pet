@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""0.3.54 回归：`/push` 的 `trigger` / `emotion` 两个字段必须归一化。
+r"""0.4.0 回归：`/push` 的 `trigger` / `emotion` 两个字段必须归一化。
 
 `trigger` 是 `dict.get` 默认值陷阱的**第五个**入口（前四个：`error_count`
 0.3.40、`line` 0.3.44、`language` 0.3.50、`file`/`message` 0.3.52）。它比
@@ -129,7 +129,7 @@ try:
     # 那个 except 吞掉，后面 B/C/D/E 四段**一条都不会执行** —— 看起来像"只
     # 崩了一个地方"，实际是判据失效（本项目 0.3.45 踩过：用例数变少就是信号）。
     _as_trigger = getattr(rg, '_as_trigger', None)
-    check('A0 response_generator 暴露了 _as_trigger（0.3.54 新增）',
+    check('A0 response_generator 暴露了 _as_trigger（0.4.0 新增）',
           callable(_as_trigger), '模块里没有这个函数')
 
     if callable(_as_trigger):
@@ -247,11 +247,11 @@ try:
     time.sleep(0.2)
 
     types = [f.get('type') for f in frames]
-    check('C2 四条畸形 trigger 全部收到 errorAlert（0.3.54 前是 chatMessage）',
+    check('C2 四条畸形 trigger 全部收到 errorAlert（0.4.0 前是 chatMessage）',
           types.count('errorAlert') >= 3 and 'chatMessage' not in types,
           'types=%r' % types)
     emos = [(f.get('payload') or {}).get('emotion') for f in frames]
-    check('C3 情绪不再是 idle（0.3.54 前四组都是 idle）',
+    check('C3 情绪不再是 idle（0.4.0 前四组都是 idle）',
           'idle' not in emos and bool(emos), 'emotions=%r' % emos)
     texts = [(f.get('payload') or {}).get('text', '') for f in frames]
     check('C4 文本里不出现 encourage 池的台词',
@@ -269,7 +269,7 @@ try:
                 ['happy'], {'e': 'happy'}]
     bad = [(v, st._as_emotion(v)) for v in bad_vals
            if st._as_emotion(v) != 'idle']
-    check('D2 陌生 / 非字符串一律回落 idle（0.3.54 前原样放行）', not bad, repr(bad))
+    check('D2 陌生 / 非字符串一律回落 idle（0.4.0 前原样放行）', not bad, repr(bad))
 
     _EMOTIONS = getattr(st, '_EMOTIONS', None)
     check('D3 _EMOTIONS 与语料 EMOTION_MAP 的取值集合完全一致',

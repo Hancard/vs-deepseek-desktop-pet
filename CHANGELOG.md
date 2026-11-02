@@ -1,5 +1,90 @@
 # Change Log
 
+## [0.4.0] — 2026-11-02
+
+### Fixed
+
+- **`/push` 的 `trigger` 没归一化：明明有 5 个 bug，桌宠却在夸你"有进步"**
+  （`python_backend/response_generator.py`）
+
+  `context` 是外部 `/push` 写的，而 `dict.get(k, default)` 的默认值**只在
+  键不存在时**生效。`{"trigger": null}` 拿到的是 `None` 而不是
+  `"diagnostics"`，一路穿过 `trigger in ("diagnostics", "file_scan")`（False）
+  与三个 `elif trigger == ...`（全 False），落进
+  `else: emotion="idle", category="encourage"`。
+
+  实测（真 standalone + 真 `/push` + 真 SSE 帧，`count=5` 且带 3 条
+  `sample_errors`）：
+
+  ```
+  trigger="diagnostics"  -> errorAlert / surprised / "天哪 5 个错误！…别慌"
+  trigger=null           -> chatMessage / idle / "…你的代码确实有进步了。"
+  trigger=["file_scan"]  -> chatMessage / idle / "慢慢来嘛，谁一开始就写得好？"
+  trigger=123            -> chatMessage / idle / "累了就喝口水休息一下。"
+  ```
+
+  三条畸形输入都是 HTTP 200、"已推送"、日志零行 —— 用户看到的是**有 5 个
+  错误，桌宠却在鼓励他**，连气泡颜色都不是红的。这是 `dict.get` 默认值陷阱的
+  第五个入口（前四个：`error_count` 0.3.40、`line` 0.3.44、`language` 0.3.50、
+  `file`/`message` 0.3.52）。
+
+  修法：新增 `_as_trigger()`，只认五个已知事件，其余一律回落
+  `"diagnostics"` —— 因为调用方已经把 `error_count` 一起送来了，"报错还是
+  干净"由那个数决定，不需要 trigger 来猜（这也与 `standalone._builtin_reply`
+  的口径一致：它本来就不看 trigger 判断有没有错，只在 `trigger ==
+  "file_scan"` 时换说法）。
+
+- **`diagnostics` + 0 错会念"第 ? 行少了个括号"**
+  （`python_backend/response_generator.py`）
+
+  同一个文件的另一半：`error_count=0` 时走 `categorize_errors([])`，而它对
+  空列表恒返回 `"syntax_error"`，选池用的正是这个 category —— 于是"一个错误
+  都没有"会让桌宠说"第 {line} 行少了个括号…你是打算自己数着玩吗？"
+  （`{line}` 预置成 `?`，念出来就是"第 ? 行"）。
+
+  以前这条路径被"扩展只在 `count > 0` 时发 diagnostics"挡着，`trigger`
+  归一化之后它会正经走到这里。修法：`error_count <= 0` 时直接走 `encourage`
+  池（中性台词）+ `idle` 情绪。
+
+- **`emotion` 没有白名单：陌生值让角色表情卡住 8 秒，还多发一个 404**
+  （`desktop_pet/standalone.py`）
+
+  `_as_emotion` 原来的口径是"是字符串、非空就放行"（截到 32 字符），于是
+  `{"emotion": "nope"}` 会原样进 SSE。而 `ui.html` 的 `setEmotion` 拿它做
+  两件事，两件都出事：
+
+  - `charBox.setAttribute("data-emotion", "nope")` —— CSS 只有
+    `[data-emotion="angry"]` 等四条规则，陌生值让它们**全部失配**，角色卡的
+    表情动作直接停住（8 秒后定时器刷回 idle 才恢复）；
+  - `CHAR_IMG.replace(/(\.\w+)$/, "_" + emotion + "$1")` —— 拼出一个必然
+    404 的图片地址，`onerror` 再闪回默认图。
+
+  实测旧码：`_as_emotion("nope")` -> `"nope"`、`_as_emotion("../evil")` ->
+  `"../evil"`（拼出来是 `character_../evil.png`）。
+
+  这与 `_as_msg_type` 是同一个判断的两半 —— 那个早就有 `_PUSH_TYPES` 白名单
+  （注释写着"不认识的名字则在 switch 里落空"，正是这里的情形），这个一直没
+  跟上。修法：新增 `_EMOTIONS`，并与语料 `EMOTION_MAP` / `CLICK_EMOTIONS`、
+  前端 `EMOTION_EXPRESSION` 三方逐集合对撞（`test_pet_054` 的 D 段）。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_054.py`（25 条）。A 段 `_as_trigger` 逐值；
+  B 段判据是**台词归属**（0 错的 20 次抽样必须全部落在 encourage 池里，旧码
+  必然产出 syntax_error 的 9 条之一）；C 段起**真**服务端、走真 `/push` +
+  真 SSE，用帧里的 `type` 判定（副作用判据）；D 段与三处常量对撞；E 段静态
+  判据防回退
+- 判断力：回滚两个实现文件 → **8 PASS / 15 FAIL**（A0/A3/B1/B2/C2/C3/C4/
+  D2/D3/D4/D5/E1~E4），修复后 **25 PASS / 0 FAIL**
+
+### Changed
+
+- **版本号重新计数：这一版是 `0.4.0`，不再是 `0.3.54`**。`0.3.x` 的 patch
+  一路涨到 54，两位数的 patch 既不好念也不好比较，所以从这一版起改用
+  **patch 只到 9、满 9 进 minor** 的规则（`0.4.9` 之后是 `0.5.0`）。
+  语义化版本本身没有破坏：`0.4.0` 严格大于 `0.3.54`，装过旧版的用户能正常
+  升级，不需要 `--force`。
+
 ## [0.3.53] — 2026-11-01
 
 ### Fixed

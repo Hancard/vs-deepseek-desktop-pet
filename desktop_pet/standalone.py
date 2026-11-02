@@ -957,12 +957,12 @@ def _as_msg_type(value):
 
 
 #: 前端 `EMOTION_EXPRESSION`（Live2D 表情）与 CSS `[data-emotion="..."]`
-#: 真正认得的五个（0.3.54）。见 _as_emotion。
+#: 真正认得的五个（0.4.0）。见 _as_emotion。
 _EMOTIONS = frozenset({'idle', 'greeting', 'angry', 'happy', 'surprised'})
 
 
 def _as_emotion(value):
-    """情绪名归一化（0.3.45 收类型，0.3.54 收白名单）：只认五个，其余 idle。
+    """情绪名归一化（0.3.45 收类型，0.4.0 收白名单）：只认五个，其余 idle。
 
     ⚠️ 除了"前端 setEmotion 收到数字会当类名拼"这种小问题，主要原因是
     **帧的合法性**：`{"emotion": 1e999}` 解析成 float('inf')，而
@@ -971,7 +971,7 @@ def _as_emotion(value):
     消失**；坏帧还留在队列里，之后每次重连按 SSE_REPLAY_COUNT 重播都再炸
     一次。_sse_safe 只保证"能 utf-8 编码"，管不了 JSON 合法性。
 
-    ⚠️ 0.3.54：原来的口径是"是字符串、非空就放行"（截到 32 字符），
+    ⚠️ 0.4.0：原来的口径是"是字符串、非空就放行"（截到 32 字符），
     于是 `{"emotion": "nope"}` 会原样进 SSE。而 `ui.html` 的 `setEmotion`
     拿它做两件事，**两件都出事**：
 
