@@ -1691,7 +1691,31 @@ class AiriHandler(BaseHTTPRequestHandler):
                 # ⚠️ 这条分支同样要归一化（0.3.42）：`{"message": {"a": 1}}`
                 # 会走到这里，dict 原样进 SSE 后前端念出 [object Object]
                 # （见 _as_text 的注释）。
-                push_message('chatMessage', _as_text(msg.get('message', body)), 'idle')
+                #
+                # ⚠️ 但**不能**把请求体当兜底（0.4.1）。这里以前是
+                #     push_message('chatMessage', _as_text(msg.get('message', body)))
+                # —— 只要 msg 里没有 `message` 键，`body`（原始请求体）就顶上来。
+                # 于是任何"结构化但没写内容"的推送都让桌宠念出一坨 JSON。实测
+                # （真服务端 + 真 SSE，见 test_pet_055 的 A 段）：
+                #     {"type":"errorAlert","payload":{"emotion":"angry"}}
+                #       -> 气泡：{"type": "errorAlert", "payload": {"emotion": "angry"}}
+                #     {"type":"chatMessage","payload":"hi"} -> 念整串
+                #     {"type":"chatMessage","payload":{}}  -> 念整串
+                #     {"foo": 1} / {}                      -> 念 {"foo": 1} / {}
+                # 这些输入的共同点是**调用方没说"要说什么"**，只是消息结构残缺。
+                # 把结构本身念给用户看，既不解决问题，还让用户以为桌宠坏了。
+                # 只认两种"明确表达内容"的形态，其余静默丢弃并留痕
+                # （HTTP 仍是 200 + pushed：请求确实被受理了，只是没话可说）。
+                content = msg.get('message')
+                if content is None:
+                    # 扁平写法：脚本手敲 POST /push 时最常见，文档里没有但
+                    # 一直能用，不能因为这次收口就把它弄坏
+                    content = msg.get('text')
+                if content is None:
+                    log('[airi-standalone] /push ignored: object without '
+                        'message/text (keys=%s)' % ','.join(list(msg)[:6]))
+                else:
+                    push_message('chatMessage', _as_text(content), 'idle')
             self._json_response({'status': 'pushed'})
         elif self.path == '/event':
             body = self._read_body()
