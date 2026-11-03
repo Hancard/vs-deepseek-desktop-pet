@@ -1,5 +1,54 @@
 # Change Log
 
+## [0.4.1] — 2026-11-03
+
+### Fixed
+
+- **`/push` 把请求体当台词念：桌宠对着你说出一串 JSON**
+  （`desktop_pet/standalone.py`）
+
+  `do_POST` 最后一个 `else` 分支的兜底是 `msg.get('message', body)`，
+  而 `body` 是**原始请求体**。只要消息是个 JSON 对象、且没有 `message`
+  键，整个请求体就被当成"要念的话"。实测（真服务端 + 真 SSE 帧）：
+
+  ```
+  {"type":"errorAlert","payload":{"emotion":"angry"}}
+    -> text = '{"type": "errorAlert", "payload": {"emotion": "angry"}}'
+  {"type":"chatMessage","payload":"hi"}   -> 念整串
+  {"type":"chatMessage","payload":{}}     -> 念整串
+  {"foo": 1}                              -> 念 '{"foo": 1}'
+  {}                                      -> 念 '{}'
+  {"text":"扁平写法"}                      -> 念 '{"text": "扁平写法"}'（也被套壳）
+  ```
+
+  这些输入的共同点是**调用方没说"要说什么"**，只是消息结构残缺 —— 把结构
+  本身念给用户看，既不解决问题，还会让用户以为桌宠坏了。
+
+  修法：只认两种"明确表达内容"的形态 —— 顶层 `message`（本文件一直在用
+  的纯文本键）与顶层 `text`（脚本手敲 `POST /push` 时最常见的扁平写法）。
+  两者都没有时静默丢弃，并在日志留一行
+  `/push ignored: object without message/text (keys=...)`；HTTP 仍是
+  `200 {"status":"pushed"}`（请求确实被受理，只是没话可说），不影响任何
+  只看状态码的客户端。
+
+  顺带修好一件事：扁平的 `{"text": "..."}` 以前也走同一条兜底，被**套壳**
+  成 `{"text": "..."}` 念出来 —— 现在能正常念出正文。
+
+  `payload.text` / `diagnostics` / `trigger` 三条正常分支一个字都没动
+  （回归里有各自的控制组）。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_055.py`（18 条）。判据是**有没有产生 SSE 帧**，
+  而不是"文本里有没有花括号"——台词库里本来就有 `(╯°□°)╯` 这种带括号的
+  句子，按文本判会误伤控制组。A 段五种"结构化但没内容"的输入必须 0 帧；
+  B 段 message / 扁平 text / message 为对象 / 空 message 四种控制组照念；
+  C 段三条正常分支（`payload.text`、`diagnostics`、`all_clear`）不受影响；
+  D 段完全不是 JSON 的 body 仍按纯文本念（`curl -d hello`）；
+  E 段静态判据（**先剥注释再判**，否则旧写法留在"此处以前是…"里会让判据恒 FAIL）
+- 判断力：回滚 `standalone.py` → **9 PASS / 9 FAIL**，每条失败都带着
+  `texts=['{"type": "errorAlert", ...}']` 这样的实测帧原文
+
 ## [0.4.0] — 2026-11-02
 
 ### Fixed
