@@ -40,6 +40,23 @@ except Exception as e:
     _backend_available = False
     print(f'[airi-standalone] WARNING: Python backend not available: {e!r}')
 
+# "这次触发是不是**故意不说话**"（0.4.2）。
+# ⚠️ 判据必须来自生成器**同一份实现**：`generate_response` 用 `_as_trigger`
+# 决定要不要 `return None`，而这边要判"None 是决定不说、还是生成失败"。
+# 自己再写一份 `== 'heartbeat'` 的后果见 `is_silent_trigger` 的注释 ——
+# 多一个空格就把心跳当成"全部清零"念出来。
+# 单独一个 try 而不是并进上面那个：生成器可用但版本偏旧（缺这个函数）时，
+# 不该把整个后端判成不可用 —— 那会让所有播报退化成内置台词。
+try:
+    from response_generator import is_silent_trigger as _is_silent_trigger
+except Exception:
+    def _is_silent_trigger(value):
+        """回落口径：strip 之后是 heartbeat 才算"故意不说"。
+
+        与 `_as_trigger` 的 strip 保持一致（这是修复前那个 bug 的全部内容）。
+        """
+        return isinstance(value, str) and value.strip() == 'heartbeat'
+
 # 台词库（语料）。单独 try：它是**用户可编辑**的，而且点击台词也归它管
 # （原来的 CLICK_LINES 已迁进 corpus.py）—— 不能因为 response_generator
 # 那条链出问题就连"点一下有反应"都没了。
@@ -1018,6 +1035,20 @@ def push_message(msg_type: str, text: str, emotion: str = "idle"):
         text = _as_text(text)
     except Exception:
         text = ''
+    # ⚠️ 没有可见文字就**不发帧**（0.4.2）。以前 `text=''` 会照常入队，
+    # 前端 `showBubble` 遇到空串直接 return（连气泡都不建），但紧跟着那句
+    # `setEmotion(emotion || 'idle')` 照样执行 —— 于是一条"没有话"的推送
+    # 会把角色表情打回 idle，屏幕上毫无动静，日志里也看不出发生过什么。
+    # 全空白（三个空格 / 两个换行）更糟：`'   '` 在 JS 里是真值，会建出一个
+    # **看不见却占着 region** 的空气泡，挂满 8 秒（还会把已有气泡顶上去）。
+    # 实测：`POST /push`，payload 里的 text 传三个空格 → 出一条 text
+    # 全是空格的帧。这里**不要**在注释里写左花括号：test_pet_044/045 用
+    # "找到第一个左花括号再配对"的方式抠本函数体，注释里的它会把切片截断，
+    # 于是 MAX_PUSH_CHARS / allow_nan=False 的静态判据全部误红（0.4.2 踩过）。
+    # 这与 0.4.1 定的口径一致：调用方没表达"要说什么"就不发帧（那边挡的是
+    # "没有 message/text 键"，这边挡的是"有键但没内容"）。
+    if not text.strip():
+        return
     if len(text) > MAX_PUSH_CHARS:
         text = text[:MAX_PUSH_CHARS] + '…（已截断）'
     payload = {"type": msg_type,
@@ -1118,6 +1149,20 @@ def _builtin_reply(error_count, trigger='diagnostics', file='', items=None,
                  "过期作废"闸门（0.3.44）—— 否则兜底会绕过它。
     """
     emit = _push or push_message
+    if _is_silent_trigger(trigger):
+        # 心跳是唯一"故意不说话"的触发词，**兜底台词也不例外**（0.4.2）。
+        #
+        # ⚠️ 这条分支在 0.4.2 之前是缺口，而且是**最容易踩到的那一半**：
+        # 后端不可用时（`_backend_available` 为 False，比如 python_backend
+        # 拷不全 / response_generator 导入失败），`/push` 的 trigger 分支
+        # 根本不去 `_generate_async`，"心跳不该说话"的判据只存在于
+        # `_generate_async._run` 里 —— 于是一模一样的请求
+        # `{"trigger":"heartbeat"}` 在这里落进最底下那句
+        # `emit('chatMessage', '哼，全部修好了…算你厉害。', 'happy')`，
+        # 桌宠凭空报"全部修好了"。
+        # 不写日志：心跳是**高频**事件（名字就叫心跳），逐条记会把排障日志
+        # 刷满；"没说话"在心跳这个语义下不是异常。
+        return
     if trigger == 'file_scan':
         # ⚠️ 走 _as_label（0.3.52）：`file or '当前文件'` 对数组/对象是**真值**，
         # 于是 `['a.py']` 被原样念进气泡（与 response_generator 同一条）。
@@ -1300,7 +1345,11 @@ def _generate_async(ctx, tag):
                 # 静默（response_generator 里 `elif trigger == "heartbeat":
                 # return None`）。兜底绝不能把"决定不说"改成"说一句内置台词"，
                 # 否则桌宠会在每次心跳时自言自语。
-                if r is None and str(ctx.get('trigger') or '') == 'heartbeat':
+                # ⚠️ 判据必须走 `_is_silent_trigger`（0.4.2）：这里以前是
+                # `str(ctx.get('trigger') or '') == 'heartbeat'`，而生成器那边
+                # 是 strip 之后再比 —— `" heartbeat"` 被判成"要说"，于是兜底
+                # 台词顶上来念了句"全部修好了"。
+                if r is None and _is_silent_trigger(ctx.get('trigger')):
                     return
                 _fallback()
                 return
