@@ -158,8 +158,12 @@ try:
     post({'message': ''})
     time.sleep(1.2)
     got = texts_since(before)
-    check('B4 空 message 仍照旧推送（不扩大本次改动范围）',
-          got == [''], repr([t[:20] for t in got]))
+    # ⚠️ 0.4.2 改了口径。0.4.1 时刻意"不扩大本次改动范围"，空 message 照推；
+    # 但一条 text 为空的帧前端不建气泡、却照样执行 `setEmotion('idle')`，
+    # 而三个空格（`'   '` 在 JS 里是真值）会建出一块看不见却占着 region 的
+    # 空气泡挂满 8 秒。现在统一成"没有可见文字就不发帧"。
+    check('B4 空 message 不发帧（0.4.2 收口：无可见文字就不说话）',
+          got == [], repr([t[:20] for t in got]))
 except Exception as exc:
     check('B 段未崩', False, '%s: %r' % (type(exc).__name__, exc))
 

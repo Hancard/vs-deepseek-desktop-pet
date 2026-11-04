@@ -406,11 +406,16 @@ try:
           last_frame()['payload']['text'] == '{"a": 1}',
           'got=%r' % last_frame()['payload']['text'])
 
+    # ⚠️ 0.4.2 改了口径：没有可见文字**不再发帧**（全空白会建出一个看不见
+    # 却占着 region 的空气泡，空串则会把表情打回 idle 而屏幕上毫无动静）。
+    # 这条断言的**原意**是"归一化产出空串、而不是把 None 变成字符串 'None'"，
+    # 那个性质仍然要守住 —— 所以直接查归一化函数，外加"不发帧"。
     standalone.sse_queue.clear()
     standalone.push_message('chatMessage', None)
-    check('C1-9 text=None → 空串（不是 null）',
-          last_frame()['payload']['text'] == '',
-          'got=%r' % last_frame()['payload']['text'])
+    check('C1-9 text=None → 归一化成空串，且不发帧（0.4.2 收口）',
+          standalone._as_text(None) == '' and len(standalone.sse_queue) == 0,
+          'as_text=%r queue=%d' % (standalone._as_text(None),
+                                   len(standalone.sse_queue)))
 
     code = strip_comments(grab_fn(SSRC, 'def push_message('))
     check('C1-10 归一化写在唯一出口里（type/emotion/text 三个都在）',
