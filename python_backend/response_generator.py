@@ -197,6 +197,27 @@ def _as_trigger(value):
     return "diagnostics"
 
 
+def is_silent_trigger(value):
+    """这次触发是否属于"**故意不说话**"（0.4.2）。
+
+    ⚠️ 这个判据只能有**一份**，而且必须建在 `_as_trigger` 之上 —— 它要回答
+    的问题正是"`generate_response` 返回 None，是'我决定不说'还是'我生成失败'"。
+    返回 None 之后，standalone 那边必须知道该不该拿兜底台词顶上去。
+
+    修复前 standalone 自己写了一份 `str(ctx.get('trigger')) == 'heartbeat'`，
+    而 `_as_trigger` 是**先 strip 再比对**的 —— 同一个值在两个进程里被解释成
+    两件事。实测（真服务端 + 真 `/push` + 真 SSE 帧，修复前）：
+
+        {"trigger":"heartbeat"}    → 无帧（对）
+        {"trigger":" heartbeat"}   → chatMessage/happy「哼，全部修好了…算你厉害。」
+        {"trigger":"heartbeat "}   → 同上
+        （后端不可用时连**原样**的 heartbeat 也播报，见 _builtin_reply）
+
+    也就是说：多打一个空格，心跳就被当成"全部清零"的喜报念出来。
+    """
+    return _as_trigger(value) == "heartbeat"
+
+
 def _as_label(value, fallback="?", max_len=200):
     """把"要念给人听的标量"收敛成短字符串（0.3.52）。
 
@@ -493,6 +514,27 @@ def generate_response(context: dict) -> dict:
             item["file"] = _as_label(item.get("file"), "", 120)
         errors.append(item)
     context["sample_errors"] = errors
+
+    # ⚠️ 触发词与计数打架时**以计数为准**（0.4.2）。`all_clear` 的语义就是
+    # "一个错误都没有"，可它与 `error_count` 是**两个独立字段**：外部调用方
+    # （脚本 / 第三方插件 / 拿旧版扩展配新版桌宠）完全可能送来
+    # `{"trigger":"all_clear","error_count":3}`。旧口径照 trigger 直走 →
+    # 类型 chatMessage、情绪 happy、台词「哼，终于修好了」—— 明明 3 个错误，
+    # 桌宠在道喜，连气泡都不是红的。实测（真服务端 + 真 `/push` + 真 SSE）：
+    #
+    #     {"trigger":"all_clear","error_count":3,
+    #      "sample_errors":[{"line":4,"message":"boom"}]}
+    #       → chatMessage / happy / '哼，终于修好了。不过别得意，下一轮肯定还会出错的。'
+    #
+    # 这与 `_as_trigger` 的回落口径同源（那里的注释写着"'报错还是干净'由
+    # 那个数决定"）—— 同一个原则不能只在"值不认识"时生效。
+    if trigger == "all_clear" and error_count > 0:
+        trigger = "diagnostics"
+        # 回写：`try_deepseek_api` 会自己再调一次 `_as_trigger(context.get(...))`，
+        # 不同步的话提示词那边仍然写着"程序员刚把错误全部修好"，
+        # 于是 LLM 版本和本地语料版本说出两件相反的事。
+        if "trigger" in context:
+            context["trigger"] = trigger
 
     # 确定消息类型
     if trigger in ("diagnostics", "file_scan") and error_count > 0:
