@@ -1,5 +1,120 @@
 # Change Log
 
+## [0.4.2] — 2026-11-04
+
+### Fixed
+
+- **心跳多打一个空格就变成"全部修好了"的喜报 —— 静默契约只写在三个出口中的一个**
+  （`python_backend/response_generator.py` / `desktop_pet/standalone.py`）
+
+  `generate_response` 里 `elif trigger == "heartbeat": return None`，返回
+  `None` 的意思是"我**决定**不说"。可是 standalone 那边必须判断"这个 `None`
+  是决定不说、还是生成失败该说兜底台词"，它的判据是另外写的一份裸比较：
+
+  ```python
+  if r is None and str(ctx.get('trigger') or '') == 'heartbeat':
+  ```
+
+  而生成器是**先 `strip()` 再比对**的（`_as_trigger`）。同一个值在两个进程里
+  被解释成两件事。实测（真服务端 + 真 `/push` + 真 SSE 帧）：
+
+  ```
+  {"trigger":"heartbeat"}    -> 无帧（对）
+  {"trigger":" heartbeat"}   -> chatMessage / happy / 哼，全部修好了…算你厉害。
+  {"trigger":"heartbeat "}   -> 同上
+  {"trigger":"heartbeat\n"}  -> 同上
+  ```
+
+  也就是说：调用方多打一个空格，心跳就从"安静"变成"错误清零"的喜报。
+
+  缺口有**两半**。后端不可用时（`_backend_available=False`，比如
+  `python_backend` 拷不全、`response_generator` 导入失败），`/push` 的
+  trigger 分支根本不走 `_generate_async`，而是直接 `_builtin_reply(...)`，
+  而那个函数**不看 trigger 是否该沉默** —— 于是连**原样**的
+  `{"trigger":"heartbeat"}` 也会播报同一句"全部修好了"。判据只写在了
+  `_generate_async._run` 里，兜底那个出口没有。
+
+  修法：判据收敛成**一份** `response_generator.is_silent_trigger(value)`
+  （内部就是 `_as_trigger(value) == "heartbeat"`，与生成器的归一化同源），
+  standalone 通过 `from response_generator import is_silent_trigger as
+  _is_silent_trigger` 使用它；另有一个"生成器版本偏旧、缺这个函数"时的
+  同口径回落（`strip()` 后比对），**不**把整个后端判成不可用。然后在
+  **两个出口**都落这道闸门：`_builtin_reply` 开头直接 return、`_run` 的
+  `None` 分支改用它判断。
+
+  `HEARTBEAT`（全大写）仍然会说话 —— 那是 `_as_trigger` 既有的口径
+  （只认五个小写事件名，其余回落 `diagnostics`），不是这次要改的东西。
+
+- **`all_clear` 与 `error_count` 打架时按 trigger 走：明明 3 个错误也在道喜**
+  （`python_backend/response_generator.py`）
+
+  `all_clear` 的语义是"一个错误都没有"，但它和 `error_count` 是**两个独立
+  字段**，外部调用方（脚本 / 第三方插件 / 旧版扩展配新版桌宠）完全可能送来
+  `{"trigger":"all_clear","error_count":3}`。旧口径照 trigger 直走，于是：
+
+  ```
+  {"trigger":"all_clear","error_count":3,
+   "sample_errors":[{"line":4,"message":"boom"}]}
+    -> chatMessage / happy / 哼，终于修好了。不过别得意，下一轮肯定还会出错的。
+  ```
+
+  类型连 `errorAlert` 都不是（气泡不红），情绪是 happy，台词在庆祝。
+  `_as_trigger` 的注释写着"'报错还是干净'由那个数决定" —— 同一个原则不能
+  只在"值不认识"时生效。
+
+  修法：`trigger == "all_clear" and error_count > 0` 时把 trigger 改判成
+  `diagnostics`，并**回写** `context["trigger"]` —— `try_deepseek_api` 会
+  自己再调一次 `_as_trigger` 读 `context`，不同步的话提示词那边仍然写着
+  "程序员刚把错误全部修好"，LLM 版本和本地语料版本会说两件相反的事。
+  修复后同一输入：
+
+  ```
+   -> errorAlert / angry / 第 4 行少了个括号…你是打算自己数着玩吗？
+  ```
+
+- **有键但没内容的文本照样发帧：一块看不见却占着窗口形状的空气泡**
+  （`desktop_pet/standalone.py`）
+
+  `{"payload":{"text":""}}` / `{"payload":{"text":"   "}}` 都会入队一条帧。
+  前端 `showBubble('')` 遇到空串直接 return（连气泡都不建），但紧跟着那句
+  `setEmotion(emotion || 'idle')` 照样执行 —— 一条"没有话"的推送把角色表情
+  打回 idle，屏幕上毫无动静，日志里也看不出发生过什么。全空白更糟：`'   '`
+  在 JS 里是**真值**，会建出一个看不见却占着 region 的空气泡，挂满 8 秒，
+  还会把已有气泡往上顶。
+
+  实测（修复前）：
+
+  ```
+  {"payload":{"text":""}}     -> 一条 text = '' 的帧
+  {"payload":{"text":"   "}}  -> 一条 text = '   ' 的帧
+  {"payload":{"text":"\n\n"}} -> 一条 text = '\n\n' 的帧
+  {"message":"   "}           -> 一条 text = '   ' 的帧
+  ```
+
+  修法：`push_message`（唯一出口）在归一化之后加一道
+  `if not text.strip(): return`。0.4.1 挡的是"没有 `message`/`text` 键"，
+  这次是"有键但没内容"，同一个口径的另一半。正文内容一个字节都不改
+  （前后空格保留，只有**全空白**才丢弃）。
+
+### Tests
+
+- 新增 `live2d_probe/test_pet_056.py`（31 条）：`is_silent_trigger` 逐值与
+  `_as_trigger` 对撞、真服务端四种心跳写法零帧、**无后端**那条出口直打
+  `_builtin_reply`、`all_clear` 与计数打架（含 30 次抽样的**台词归属**判据）、
+  空白文本零帧、6 条静态/结构判据（`_run` 的 `None` 分支必须调用
+  `_is_silent_trigger`，用 AST 判而不是查字符串）。
+- 判断力：回滚两个实现文件 → **6 PASS / 25 FAIL**（失败信息直接是
+  `同样一句「哼，全部修好了…算你厉害。」` 与
+  `text = '   '`）；恢复后 31 PASS / 0 FAIL。
+  注意 `B1`（原样 heartbeat）在旧码上是**通过**的 —— 它正是"判据不能
+  只会红"的控制组。
+- 两条**旧断言随口径更新**（不是放宽，是钉住新契约；两条在旧码上都仍然是红的）：
+  - `test_pet_055` B4：原先刻意"不扩大改动范围"，断言空 `message` 照推
+    （`got == ['']`）；现在改为"不发帧"。
+  - `test_pet_045` C1-9：原先从队列里捞一条 text 为空的帧；现在同时查
+    `_as_text(None) == ''`（原意：归一化不能产出字符串 `None`）与
+    "队列为空"。
+
 ## [0.4.1] — 2026-11-03
 
 ### Fixed
